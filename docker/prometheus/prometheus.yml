@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'l1_support_api'
+    static_configs:
+      - targets: ['l1_api:8000']
+    metrics_path: /metrics
+
+  - job_name: 'otel_collector'
+    static_configs:
+      - targets: ['otel_collector:8889']
