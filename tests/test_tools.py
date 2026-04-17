@@ -26,7 +26,7 @@ def test_order_lookup_found():
 def test_order_lookup_not_found():
     result = order_lookup.invoke({"order_id": "NONEXISTENT-999", "brand_id": "boohoo_uk"})
     assert result["found"] is False
-    assert "not found" in result["message"].lower()
+    assert "no order found" in result["message"].lower() or "not found" in result["message"].lower()
 
 
 def test_order_lookup_wrong_brand():

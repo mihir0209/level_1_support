@@ -64,7 +64,21 @@ async def lifespan(app: FastAPI):
     else:
         log.warning("falkordb_not_available", msg="Running without knowledge graph — check FalkorDB")
 
+    # Start ingestion scheduler (Phase 2)
+    try:
+        from ingestion.scheduler import start_scheduler
+        start_scheduler()
+    except Exception as e:
+        log.warning("scheduler_start_failed", error=str(e))
+
     yield
+
+    # Shutdown scheduler
+    try:
+        from ingestion.scheduler import stop_scheduler
+        stop_scheduler()
+    except Exception:
+        pass
 
     log.info("shutdown")
 
@@ -378,6 +392,97 @@ async def health():
 @app.get("/metrics")
 async def metrics():
     return PlainTextResponse(generate_latest(), media_type="text/plain")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# VOICE ENDPOINTS (Phase 2)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class VoiceStartRequest(BaseModel):
+    brand: str
+    customer_name: str | None = None
+
+
+@app.post("/voice/incoming")
+async def voice_incoming(request: Request):
+    """
+    Twilio webhook — receives inbound call and returns TwiML to connect to Daily.
+    Twilio sends form-encoded POST; brand is resolved from the Twilio number's config.
+    """
+    form = await request.form()
+    from_number = form.get("From", "")
+    call_sid = form.get("CallSid", str(uuid.uuid4()))
+    to_number = form.get("To", "")
+
+    # Resolve brand from the Twilio number being called
+    # Phase 2: map TWILIO_PHONE_NUMBER → brand via config
+    brand_id = "boohoo_uk"  # default; extend via per-number config
+
+    from channels.voice.router import handle_incoming_call
+    twiml = await handle_incoming_call(
+        brand_id=brand_id,
+        from_number=from_number,
+        call_sid=call_sid,
+    )
+    return PlainTextResponse(twiml, media_type="text/xml")
+
+
+@app.post("/voice/start")
+async def voice_start(req: VoiceStartRequest):
+    """Dev endpoint — start a voice call session and return the Daily room URL to join."""
+    brand_entry = resolve_brand(req.brand)
+    if not brand_entry:
+        raise HTTPException(status_code=400, detail=f"Unknown brand: {req.brand}")
+
+    from channels.voice.router import start_dev_call
+    call_info = await start_dev_call(brand_id=brand_entry.brand_id)
+    return call_info
+
+
+@app.get("/voice/active")
+async def voice_active():
+    """List all active voice calls (admin)."""
+    from channels.voice.router import get_active_calls
+    return {"calls": get_active_calls()}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INGESTION ENDPOINTS (Phase 2)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class IngestRequest(BaseModel):
+    brand: str
+    url: str | None = None  # if None: full brand crawl
+
+
+@app.post("/admin/ingest")
+async def admin_ingest(req: IngestRequest):
+    """
+    Trigger a crawl-to-graph ingestion run.
+    - With url: ingest a single page immediately (on-demand)
+    - Without url: trigger a full brand crawl in background
+    """
+    brand_entry = resolve_brand(req.brand)
+    if not brand_entry:
+        raise HTTPException(status_code=400, detail=f"Unknown brand: {req.brand}")
+
+    brand_id = brand_entry.brand_id
+    base_url = f"https://{brand_entry.domain}"
+
+    if req.url:
+        from ingestion.pipeline import run_url
+        report = await run_url(brand_id=brand_id, url=req.url)
+        return report.to_dict()
+    else:
+        from ingestion.scheduler import trigger_crawl_now
+        return await trigger_crawl_now(brand_id)
+
+
+@app.get("/admin/jobs")
+async def admin_jobs():
+    """List all scheduled ingestion jobs."""
+    from ingestion.scheduler import list_jobs
+    return {"jobs": list_jobs()}
 
 
 # ── Import SessionOutcome for the chat endpoint ────────────────────────────

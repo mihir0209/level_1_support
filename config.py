@@ -13,11 +13,29 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    # ── LLM ────────────────────────────────────────────────────────────
+    # ── LLM Provider Selection ──────────────────────────────────────────
+    # llm_provider: "anthropic" | "azure" | "openai"
+    # "azure" routes all calls through Azure OpenAI endpoints
+    llm_provider: str = Field(default="anthropic")
+
+    # ── Anthropic ───────────────────────────────────────────────────────
     anthropic_api_key: str = Field(default="")
-    openai_api_key: str = Field(default="")
     primary_model: str = Field(default="claude-sonnet-4-6")
     fast_model: str = Field(default="claude-haiku-4-5-20251001")
+
+    # ── OpenAI (direct) ────────────────────────────────────────────────
+    openai_api_key: str = Field(default="")
+    openai_primary_model: str = Field(default="gpt-4o")
+    openai_fast_model: str = Field(default="gpt-4o-mini")
+
+    # ── Azure OpenAI ────────────────────────────────────────────────────
+    # All Azure calls go through LiteLLM: azure/<deployment_name>
+    azure_openai_api_key: str = Field(default="")
+    azure_openai_endpoint: str = Field(default="")          # https://<resource>.openai.azure.com/
+    azure_openai_api_version: str = Field(default="2024-02-01")
+    azure_primary_deployment: str = Field(default="gpt-4o")         # deployment name in Azure
+    azure_fast_deployment: str = Field(default="gpt-4o-mini")       # fast/cheap deployment
+    azure_embedding_deployment: str = Field(default="text-embedding-3-small")
 
     # ── Graph DB (FalkorDB) ─────────────────────────────────────────────
     falkordb_host: str = Field(default="localhost")
@@ -72,6 +90,13 @@ class Settings(BaseSettings):
     chatwoot_api_url: str = Field(default="http://localhost:3000")
     chatwoot_api_key: str = Field(default="")
     chatwoot_account_id: int = Field(default=1)
+
+    # ── Graphiti (temporal KG) ─────────────────────────────────────────
+    # Graphiti uses FalkorDB — same connection as knowledge graph
+    graphiti_graph_name: str = Field(default="l1_user_memory")
+
+    # ── MemPalace ───────────────────────────────────────────────────────
+    mempalace_data_dir: str = Field(default="./data/mempalace")
 
     # ── App ─────────────────────────────────────────────────────────────
     app_host: str = Field(default="0.0.0.0")
