@@ -6,7 +6,7 @@ services:
     image: falkordb/falkordb:latest
     container_name: l1_falkordb
     ports:
-      - "6379:6379"
+      - "6381:6379"
     volumes:
       - falkordb_data:/data
     healthcheck:

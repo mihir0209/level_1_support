@@ -467,7 +467,7 @@ async def admin_ingest(req: IngestRequest):
         raise HTTPException(status_code=400, detail=f"Unknown brand: {req.brand}")
 
     brand_id = brand_entry.brand_id
-    base_url = f"https://{brand_entry.domain}"
+    base_url = f"https://{brand_entry.domains[0]}"
 
     if req.url:
         from ingestion.pipeline import run_url

@@ -27,14 +27,9 @@ SESSION_TTL = timedelta(hours=2)  # session expires after 2 hours of inactivity
 # TIER 1: REDIS — Working Memory
 # ═══════════════════════════════════════════════════════════════════════════
 
-_redis: aioredis.Redis | None = None
-
-
 def get_redis() -> aioredis.Redis:
-    global _redis
-    if _redis is None:
-        _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-    return _redis
+    """Return a Redis client. Creates one per call using a connection pool (event-loop safe)."""
+    return aioredis.from_url(settings.redis_url, decode_responses=True)
 
 
 class SessionMemory:
