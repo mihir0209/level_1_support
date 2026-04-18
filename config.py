@@ -6,7 +6,7 @@ All modules import from here; no os.getenv() calls scattered in business logic.
 from __future__ import annotations
 
 from functools import lru_cache
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,11 +20,13 @@ class Settings(BaseSettings):
 
     # ── Anthropic ───────────────────────────────────────────────────────
     anthropic_api_key: str = Field(default="")
+    anthropic_api_base: str = Field(default="")   # leave blank to use Anthropic's default
     primary_model: str = Field(default="claude-sonnet-4-6")
     fast_model: str = Field(default="claude-haiku-4-5-20251001")
 
     # ── OpenAI (direct) ────────────────────────────────────────────────
     openai_api_key: str = Field(default="")
+    openai_api_base: str = Field(default="")      # leave blank to use OpenAI's default
     openai_primary_model: str = Field(default="gpt-4o")
     openai_fast_model: str = Field(default="gpt-4o-mini")
 
@@ -107,6 +109,15 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @model_validator(mode="after")
+    def _strip_trailing_slashes(self) -> Settings:
+        if self.anthropic_api_base.endswith("/"):
+            self.anthropic_api_base = self.anthropic_api_base.rstrip("/")
+        if self.openai_api_base.endswith("/"):
+            self.openai_api_base = self.openai_api_base.rstrip("/")
+        return self
+
 
 
 @lru_cache

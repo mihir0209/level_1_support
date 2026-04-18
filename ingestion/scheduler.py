@@ -71,12 +71,12 @@ async def _delta_check_job(brand_id: str, base_url: str) -> None:
 
 def register_brand_jobs(scheduler: AsyncIOScheduler) -> None:
     """Register weekly + daily jobs for every brand in the registry."""
-    for brand_id, entry in BRAND_REGISTRY.items():
-        base_url = f"https://{entry.domain}"
+    for idx, entry in enumerate(BRAND_REGISTRY):
+        brand_id = entry.brand_id
+        base_url = f"https://{entry.domains[0]}"
 
         # Weekly full crawl — Sundays 02:00 UTC, staggered by 10 mins per brand
-        brands_list = list(BRAND_REGISTRY.keys())
-        offset_minutes = brands_list.index(brand_id) * 10
+        offset_minutes = idx * 10
         full_hour = 2
         full_minute = offset_minutes % 60
         full_hour += offset_minutes // 60
@@ -127,11 +127,11 @@ def stop_scheduler() -> None:
 
 async def trigger_crawl_now(brand_id: str) -> dict[str, Any]:
     """Manually trigger a full crawl for a brand (called from admin API endpoint)."""
-    entry = BRAND_REGISTRY.get(brand_id)
+    entry = next((e for e in BRAND_REGISTRY if e.brand_id == brand_id), None)
     if not entry:
         return {"error": f"unknown brand: {brand_id}"}
 
-    base_url = f"https://{entry.domain}"
+    base_url = f"https://{entry.domains[0]}"
     log.info("manual_crawl_triggered", brand_id=brand_id)
 
     # Run in background task — return immediately

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
+from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
@@ -27,8 +28,9 @@ class L1SupportState(BaseModel):
     customer_id: str | None = None
 
     # ── Conversation ───────────────────────────────────────────────────
-    # LangGraph's add_messages annotation handles append-only accumulation
-    messages: Annotated[list[dict[str, Any]], add_messages] = Field(default_factory=list)
+    # LangGraph's add_messages annotation handles append-only accumulation.
+    # Typed as BaseMessage list so HumanMessage/AIMessage objects coerce cleanly.
+    messages: Annotated[list[BaseMessage], add_messages] = Field(default_factory=list)
     turn_count: int = 0
 
     # ── Intent & Entities (updated each turn) ─────────────────────────

@@ -161,8 +161,8 @@ Respond with ONLY valid JSON (no markdown):
 
     response = await llm_client.generate(
         prompt,
-        model=settings.fast_model,
         max_tokens=300,
+        fast=True,
     )
 
     try:
@@ -289,7 +289,8 @@ def _format_resolution_block(resolutions: list[dict[str, Any]]) -> str:
         except Exception:
             steps = []
 
-    lines = [f"RESOLUTION: {best['name']} (success rate: {best['success_rate']:.0%})"]
+    success_rate = float(best.get("success_rate") or 0)
+    lines = [f"RESOLUTION: {best['name']} (success rate: {success_rate:.0%})"]
     for step in steps:
         if isinstance(step, dict):
             instruction = step.get("instruction", "")

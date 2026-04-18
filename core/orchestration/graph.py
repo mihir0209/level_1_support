@@ -43,7 +43,7 @@ log = structlog.get_logger(__name__)
 # ─────────────────────────────────────────────────────────────────────────
 # ESCALATION THRESHOLDS
 # ─────────────────────────────────────────────────────────────────────────
-MAX_RESOLUTION_ATTEMPTS = 3
+MAX_RESOLUTION_ATTEMPTS = 10
 MAX_TURNS = 10
 LOW_CONFIDENCE_THRESHOLD = 0.45
 
@@ -176,10 +176,15 @@ def _build_llm_messages(state: L1SupportState) -> list:
         "CURRENT SESSION CONTEXT:",
         ctx.session_block,
         "---",
-        "ESCALATION RULES: Escalate if: (1) resolution_attempts >= 3, "
+        "ESCALATION RULES: Escalate if: (1) resolution_attempts >= 10, "
         "(2) customer explicitly asks for a human agent, "
         "(3) refund is overdue (>21 days since return was received), "
         "(4) confidence in resolution is below 45%.",
+        "---",
+        "RESOLUTION SIGNAL: When the customer's issue is resolved, your response MUST end with the line:",
+        "[RESOLVED]",
+        "Do NOT add this signal unless the issue is genuinely resolved. "
+        "If the customer thanks you or confirms they're satisfied, the issue is resolved.",
     ])
 
     messages = [SystemMessage(content=system_content)]
@@ -273,7 +278,7 @@ def check_resolution_routing(state: L1SupportState) -> Literal["tools", "escalat
     content = (last_ai_message.content or "").lower() if last_ai_message else ""
     explicit_escalation = any(phrase in content for phrase in [
         "connect you with", "human agent", "member of our team", "specialist",
-        "ticket_id", "reference number"
+        "ticket_id"
     ])
 
     if explicit_escalation:
@@ -285,9 +290,8 @@ def check_resolution_routing(state: L1SupportState) -> Literal["tools", "escalat
     if state.confidence < LOW_CONFIDENCE_THRESHOLD and state.turn_count > 1:
         return "escalate"
 
-    # Check if agent indicated resolution
-    resolved_phrases = ["resolved", "all sorted", "anything else", "is there anything else", "hope that helps"]
-    if any(phrase in content for phrase in resolved_phrases):
+    # Agent explicitly marked as resolved via [RESOLVED] signal in response
+    if "[resolved]" in content:
         return "close"
 
     return "continue"

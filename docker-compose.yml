@@ -61,7 +61,7 @@ services:
     environment:
       RAILS_ENV: production
       SECRET_KEY_BASE: l1support_chatwoot_secret_change_in_prod
-      DATABASE_URL: postgresql://l1support:l1support_secret@postgres:5432/chatwoot
+      DATABASE_URL: postgresql://l1support:l1support_secret@postgres:5432/l1_support
       REDIS_URL: redis://redis:6379/1
       FRONTEND_URL: http://localhost:3000
       ACTIVE_STORAGE_SERVICE: local
@@ -69,7 +69,7 @@ services:
       - "3000:3000"
     volumes:
       - chatwoot_storage:/app/storage
-    command: bundle exec rails s -p 3000 -b 0.0.0.0
+    command: /bin/sh -c "bundle exec rails db:prepare && bundle exec rails s -p 3000 -b 0.0.0.0"
 
   chatwoot_worker:
     image: chatwoot/chatwoot:latest
@@ -79,9 +79,9 @@ services:
     environment:
       RAILS_ENV: production
       SECRET_KEY_BASE: l1support_chatwoot_secret_change_in_prod
-      DATABASE_URL: postgresql://l1support:l1support_secret@postgres:5432/chatwoot
+      DATABASE_URL: postgresql://l1support:l1support_secret@postgres:5432/l1_support
       REDIS_URL: redis://redis:6379/1
-    command: bundle exec sidekiq -C config/sidekiq.yml
+    command: /bin/sh -c "bundle exec sidekiq -C config/sidekiq.yml"
 
   # ─── n8n (Workflow Automation) ──────────────────────────────────────
   n8n:

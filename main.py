@@ -22,12 +22,12 @@ from typing import Any
 import structlog
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from prometheus_client import Counter, Histogram, generate_latest
 from pydantic import BaseModel
 from starlette.responses import PlainTextResponse
 
-from brands.registry import resolve_brand
+from brands.registry import resolve_brand, BRAND_REGISTRY
 from config import settings
 from core.memory.session import create_session, get_session, update_session
 from core.ontology.models import Channel, Customer, Order, OrderStatus, Shipment
@@ -84,8 +84,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="L1 Support AI — E-Commerce Edition",
-    description="AI-native L1 customer support for Boohoo Group and e-commerce brands.",
+    title="L1 Support AI — E-Commerce Platform",
+    description="AI-native L1 customer support for multi-brand e-commerce. "
+                "Chat → /chat | Sessions → /session/new | Admin → /admin/overview",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -229,16 +230,26 @@ async def chat(req: ChatRequest):
         brand_id,
     )
 
-    # Build LangGraph state
-    messages = session_data.get("messages", [])
-    messages.append({"role": "user", "content": req.message})
+    # Build LangGraph state — convert stored dicts to HumanMessage objects
+    from langchain_core.messages import HumanMessage as HM, AIMessage as AM
+    stored = session_data.get("messages", [])
+    history_messages = []
+    for m in stored:
+        if isinstance(m, dict):
+            if m.get("role") == "user":
+                history_messages.append(HM(content=m["content"]))
+            elif m.get("role") == "assistant":
+                history_messages.append(AM(content=m["content"]))
+        else:
+            history_messages.append(m)
+    history_messages.append(HM(content=req.message))
 
     state = L1SupportState(
         session_id=req.session_id,
         brand_id=brand_id,
         channel=channel,
         customer_id=req.customer_id or session_data.get("customer_id"),
-        messages=messages,
+        messages=history_messages,
         turn_count=session_data.get("turn_count", 0),
         resolution_attempts=session_data.get("resolution_attempts", 0),
         is_resolved=session_data.get("is_resolved", False),
@@ -249,12 +260,12 @@ async def chat(req: ChatRequest):
     graph = get_graph()
     result_state = await graph.ainvoke(state)
 
-    # Extract AI response from messages
+    # Extract AI response from messages — handle both dict and BaseMessage types
     ai_response = ""
     escalation_ticket = None
     for msg in reversed(result_state.get("messages", [])):
         if hasattr(msg, "content") and not hasattr(msg, "tool_call_id"):
-            if hasattr(msg, "type") and msg.type == "ai":
+            if isinstance(msg, (AIMessage,)):
                 ai_response = msg.content
                 break
             elif isinstance(msg, dict) and msg.get("role") == "assistant":
@@ -264,9 +275,11 @@ async def chat(req: ChatRequest):
     is_escalated = result_state.get("outcome") == SessionOutcome.ESCALATED
     is_resolved = result_state.get("outcome") == SessionOutcome.RESOLVED
 
-    # Persist updated session state
+    # Persist updated session state — convert BaseMessage objects to dicts
     updated_messages = [
-        *messages,
+        *(m.content if isinstance(m, (HM, AM)) else m
+          for m in (session_data.get("messages", []) or [])),
+        {"role": "user", "content": req.message},
         {"role": "assistant", "content": ai_response},
     ]
     await update_session(req.session_id, {
@@ -392,6 +405,318 @@ async def health():
 @app.get("/metrics")
 async def metrics():
     return PlainTextResponse(generate_latest(), media_type="text/plain")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADMIN / VISUALIZATION ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+# ── Sub-routers ─────────────────────────────────────────────────────────────
+admin_router = APIRouter(prefix="/admin", tags=["Admin"])
+
+# ── Knowledge Graph ─────────────────────────────────────────────────────────
+@admin_router.get("/graph/summary")
+async def graph_summary():
+    """FalkorDB graph overview — node counts by label."""
+    try:
+        _, graph = get_graph_client()
+        result = graph.query("MATCH (n) RETURN labels(n)[0] as label, count(n) as count ORDER BY count DESC")
+        nodes = [{"label": r[0], "count": r[1]} for r in result.result_set if r[0]]
+        return {"graph": settings.falkordb_host, "total_nodes": sum(n["count"] for n in nodes), "nodes": nodes}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@admin_router.get("/graph/relationships")
+async def graph_relationships():
+    """All relationship types with counts."""
+    try:
+        _, graph = get_graph_client()
+        result = graph.query(
+            "MATCH (a)-[r]->(b) RETURN type(r) as rel_type, count(r) as count ORDER BY count DESC"
+        )
+        return {"relationships": [{"type": r[0], "count": r[1]} for r in result.result_set]}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@admin_router.get("/graph/brand/{brand_id}")
+async def graph_brand(brand_id: str):
+    """All nodes connected to a specific brand — by brand_id property."""
+    try:
+        _, graph = get_graph_client()
+        result = graph.query(
+            f"MATCH (b:Brand {{brand_id: '{brand_id}'}})-[r]-(n) "
+            f"RETURN labels(n)[0] as label, type(r) as rel, count(n) as count "
+            f"ORDER BY count DESC"
+        )
+        return {"brand_id": brand_id, "connections": [{"label": r[0], "relationship": r[1], "count": r[2]} for r in result.result_set]}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@admin_router.get("/graph/issues")
+async def graph_issues():
+    """Issue types with their resolution paths."""
+    try:
+        _, graph = get_graph_client()
+        result = graph.query(
+            "MATCH (it:IssueType)-[r]-(n) "
+            "WHERE NOT 'Brand' IN labels(n) "
+            "RETURN it.issue_type_id as issue, labels(n)[0] as connected_to, type(r) as rel, count(n) as count"
+        )
+        return {"issues": [dict(zip(["issue", "connected_to", "relationship", "count"], r)) for r in result.result_set]}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@admin_router.get("/graph/query")
+async def graph_query(q: str):
+    """Free-text Cypher query against the knowledge graph."""
+    try:
+        _, graph = get_graph_client()
+        result = graph.query(q)
+        return {"rows": [list(r) for r in result.result_set], "columns": result.header}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ── Ontology Schema ────────────────────────────────────────────────────────────
+@admin_router.get("/ontology")
+async def ontology_overview():
+    """High-level ontology: labels, properties, and relationships."""
+    try:
+        _, graph = get_graph_client()
+        labels = graph.query("CALL db.labels()").result_set
+        rels = graph.query("CALL db.relationshipTypes()").result_set
+        props = graph.query("CALL db.propertyKeys()").result_set
+        return {
+            "node_labels": sorted([r[0] for r in labels]),
+            "relationship_types": sorted([r[0] for r in rels]),
+            "property_keys": sorted([r[0] for r in props]),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@admin_router.get("/ontology/brand/{brand_id}")
+async def ontology_brand(brand_id: str):
+    """Full brand subtree — policies, issue types, FAQs, resolution steps."""
+    try:
+        _, graph = get_graph_client()
+        policies = graph.query(
+            f"MATCH (b:Brand {{brand_id: '{brand_id}'}})-[:HAS_POLICY]->(p) "
+            f"RETURN p.policy_type as type, p.title as title, keys(p) as fields"
+        )
+        issues = graph.query(
+            f"MATCH (b:Brand {{brand_id: '{brand_id}'}})-[:HAS_ISSUE_TYPE]->(it) "
+            f"RETURN it.issue_type_id as issue, it.category as category"
+        )
+        faqs = graph.query(
+            f"MATCH (b:Brand {{brand_id: '{brand_id}'}})-[:HAS_FAQ]->(f) "
+            f"RETURN f.question as question, f.category as category LIMIT 5"
+        )
+        return {
+            "brand_id": brand_id,
+            "policies": [dict(zip(["type", "title", "fields"], r)) for r in policies.result_set],
+            "issue_types": [dict(zip(["issue", "category"], r)) for r in issues.result_set],
+            "sample_faqs": [dict(zip(["question", "category"], r)) for r in faqs.result_set],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ── Knowledge Base ──────────────────────────────────────────────────────────
+@admin_router.get("/kb/faqs")
+async def kb_faqs(brand_id: str | None = None, category: str | None = None):
+    """FAQ content from FalkorDB — optionally filtered by brand and category."""
+    try:
+        _, graph = get_graph_client()
+        where = "WHERE 1=1"
+        if brand_id:
+            where += f" AND f.brand_id = '{brand_id}'"
+        if category:
+            where += f" AND f.category = '{category}'"
+        result = graph.query(
+            f"MATCH (f:FAQ) {where} "
+            f"RETURN f.question as question, f.answer as answer, f.category as category, f.keywords as keywords "
+            f"ORDER BY f.category, f.question LIMIT 100"
+        )
+        return {"count": len(result.result_set), "faqs": [dict(zip(["question", "answer", "category", "keywords"], r)) for r in result.result_set]}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@admin_router.get("/kb/policies")
+async def kb_policies(brand_id: str | None = None):
+    """Policy summaries from FalkorDB."""
+    try:
+        _, graph = get_graph_client()
+        where = f"WHERE p.brand_id = '{brand_id}'" if brand_id else ""
+        result = graph.query(
+            f"MATCH (p:Policy) {where} "
+            f"RETURN p.policy_type as type, p.title as title, p.brand_id as brand_id"
+        )
+        return {"policies": [dict(zip(["type", "title", "brand_id"], r)) for r in result.result_set]}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@admin_router.get("/kb/pgvector/chunks")
+async def kb_chunks(brand_id: str | None = None, chunk_type: str | None = None, limit: int = 20):
+    """Knowledge chunks from Postgres pgvector — semantic search base."""
+    import psycopg2
+    conn = psycopg2.connect(
+        host=settings.postgres_host,
+        port=settings.postgres_port,
+        dbname=settings.postgres_db,
+        user=settings.postgres_user,
+        password=settings.postgres_password,
+    )
+    try:
+        cur = conn.cursor()
+        query = "SELECT id, brand_id, chunk_type, left(content, 200) as content_preview, metadata FROM knowledge_chunks WHERE 1=1"
+        if brand_id:
+            query += f" AND brand_id = '{brand_id}'"
+        if chunk_type:
+            query += f" AND chunk_type = '{chunk_type}'"
+        query += f" LIMIT {limit}"
+        cur.execute(query)
+        rows = cur.fetchall()
+        return {"count": len(rows), "chunks": [{"id": str(r[0]), "brand_id": r[1], "chunk_type": r[2], "preview": r[3], "metadata": r[4]} for r in rows]}
+    finally:
+        conn.close()
+
+
+# ── Sessions ────────────────────────────────────────────────────────────────
+@admin_router.get("/sessions")
+async def list_sessions(brand_id: str | None = None, limit: int = 50):
+    """All active sessions from Redis — optionally filtered by brand."""
+    from core.memory.session import get_redis
+    r = get_redis()
+    session_keys = []
+    async for key in r.scan_iter(match="session:*"):
+        session_keys.append(key)
+    sessions = []
+    for key in session_keys[:limit]:
+        data = await r.get(key)
+        if data:
+            import json
+            d = json.loads(data)
+            if brand_id is None or d.get("brand_id") == brand_id:
+                sessions.append({
+                    "session_id": d.get("session_id"),
+                    "brand_id": d.get("brand_id"),
+                    "channel": d.get("channel"),
+                    "turn_count": d.get("turn_count", 0),
+                    "outcome": d.get("outcome"),
+                    "created_at": d.get("created_at"),
+                })
+    return {"count": len(sessions), "sessions": sessions}
+
+
+@admin_router.get("/sessions/{session_id}")
+async def get_session_detail(session_id: str):
+    """Full session state including message history."""
+    data = await get_session(session_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return data
+
+
+# ── Brand Registry ──────────────────────────────────────────────────────────
+@admin_router.get("/brands")
+async def list_brands():
+    """All registered brands in the registry."""
+    from brands.registry import BRAND_REGISTRY
+    return {
+        "count": len(BRAND_REGISTRY),
+        "brands": [
+            {"brand_id": b.brand_id, "name": b.name, "domains": b.domains, "locale": b.default_region, "chatwoot_inbox": b.chatwoot_inbox_id}
+            for b in BRAND_REGISTRY
+        ],
+    }
+
+
+@admin_router.get("/brands/{brand_id}")
+async def get_brand_detail(brand_id: str):
+    """Single brand entry."""
+    from brands.registry import get_brand_by_id
+    entry = get_brand_by_id(brand_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Brand not found")
+    return {"brand_id": entry.brand_id, "name": entry.name, "domains": entry.domains, "locale": entry.default_region, "chatwoot_inbox": entry.chatwoot_inbox_id}
+
+
+# ── System Overview ─────────────────────────────────────────────────────────
+@admin_router.get("/overview")
+async def system_overview():
+    """Full system snapshot for dashboard/demo — all stores at a glance."""
+    from core.memory.session import get_redis
+
+    # Graph stats
+    graph_ok, graph_stats = False, {}
+    try:
+        _, graph = get_graph_client()
+        labels = graph.query("MATCH (n) RETURN labels(n)[0] as label, count(n) as c ORDER BY c DESC").result_set
+        rels = graph.query("MATCH ()-[r]->() RETURN type(r) as t, count(r) as c ORDER BY c DESC").result_set
+        graph_ok = True
+        graph_stats = {
+            "nodes_by_label": [{"label": r[0], "count": r[1]} for r in labels],
+            "relationships": [{"type": r[0], "count": r[1]} for r in rels],
+        }
+    except Exception:
+        pass
+
+    # Redis sessions
+    session_count = 0
+    try:
+        r = get_redis()
+        async for _ in r.scan_iter(match="session:*"):
+            session_count += 1
+    except Exception:
+        pass
+
+    # Postgres KB
+    pg_stats = {}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(
+            host=settings.postgres_host, port=settings.postgres_port,
+            dbname=settings.postgres_db, user=settings.postgres_user,
+            password=settings.postgres_password,
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT brand_id, count(*) FROM knowledge_chunks GROUP BY brand_id")
+            pg_stats = dict(cur.fetchall())
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    return {
+        "services": {
+            "api": {"url": f"http://localhost:{settings.app_port}", "status": "up"},
+            "falkordb": {"host": settings.falkordb_host, "port": settings.falkordb_port, "status": "up" if graph_ok else "down"},
+            "postgres": {"host": settings.postgres_host, "port": settings.postgres_port, "db": settings.postgres_db},
+            "redis": {"url": settings.redis_url, "status": "up"},
+            "chatwoot": {"url": "http://localhost:3000"},
+            "n8n": {"url": "http://localhost:5678"},
+            "grafana": {"url": "http://localhost:3001"},
+        },
+        "knowledge_graph": graph_stats,
+        "postgres_kb": pg_stats,
+        "active_sessions": session_count,
+        "registered_brands": len(BRAND_REGISTRY),
+    }
+
+
+# Register admin router
+app.include_router(admin_router)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
