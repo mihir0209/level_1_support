@@ -430,24 +430,25 @@ async def _extract_batch_scrapegraph(urls: list[str], brand_name: str) -> list[t
         graph = SmartScraperMultiGraph(prompt=prompt, source=urls, config=sg_config)
 
         # graph.run() uses asyncio.run() internally — run in a thread.
-        # Also silence LangChain/ScrapeGraphAI output: the LLM often returns
-        # 'NA' strings instead of null, triggering noisy but non-fatal parse
-        # errors. We silence all langchain*/scrapegraphai loggers and redirect
-        # stdout so any remaining print() calls are also swallowed.
+        # Suppress LangChain/ScrapeGraphAI noise: the LLM returns 'NA' strings
+        # instead of null, causing noisy-but-non-fatal output parser errors.
+        # We attach a root-logger filter (catches all propagated records) and
+        # redirect stdout to swallow any direct print() calls.
         import contextlib, io, logging as _log
 
+        class _SuppressLC(_log.Filter):
+            def filter(self, r: _log.LogRecord) -> bool:
+                return not r.name.startswith(("langchain", "scrapegraphai"))
+
         def _run() -> object:
-            saved: dict[str, int] = {}
-            for name, lgr in list(_log.Logger.manager.loggerDict.items()):
-                if name.startswith(("langchain", "scrapegraphai")) and isinstance(lgr, _log.Logger):
-                    saved[name] = lgr.level
-                    lgr.setLevel(_log.CRITICAL)
+            root = _log.getLogger()
+            f = _SuppressLC()
+            root.addFilter(f)
             try:
                 with contextlib.redirect_stdout(io.StringIO()):
                     return graph.run()
             finally:
-                for name, lvl in saved.items():
-                    _log.getLogger(name).setLevel(lvl)
+                root.removeFilter(f)
 
         result = await asyncio.to_thread(_run)
 
