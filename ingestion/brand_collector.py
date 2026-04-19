@@ -353,8 +353,11 @@ async def _discover_via_duckduckgo(queries: list[str], max_per_query: int = 6) -
 # BRAND DOMAIN CRAWL — crawl4ai BFS (falls back to seed list)
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _deep_crawl_domain(base_domain: str, max_pages: int = 40) -> list[str]:
-    """BFS crawl of the brand's own domain using crawl4ai."""
+async def _deep_crawl_domain(base_url: str, max_pages: int = 40) -> list[str]:
+    """BFS crawl of the brand's own domain using crawl4ai.
+    base_url must be a fully-qualified URL (with scheme).
+    """
+    from urllib.parse import urljoin
     try:
         from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
         from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
@@ -362,17 +365,11 @@ async def _deep_crawl_domain(base_domain: str, max_pages: int = 40) -> list[str]
         strategy = BFSDeepCrawlStrategy(
             max_depth=3,
             max_pages=max_pages,
-            include_patterns=[
-                r".*(help|faq|support|returns?|refund|delivery|shipping|policy|contact|about).*"
-            ],
-            exclude_patterns=[
-                r".*(checkout|cart|login|register|cdn|\.jpg|\.png|\.css|\.js|\.svg).*"
-            ],
         )
         collected: list[str] = []
         async with AsyncWebCrawler() as crawler:
             results = await crawler.arun(
-                url=f"https://{base_domain}/",
+                url=base_url,
                 config=CrawlerRunConfig(
                     cache_mode=CacheMode.BYPASS,
                     deep_crawl_strategy=strategy,
@@ -387,13 +384,13 @@ async def _deep_crawl_domain(base_domain: str, max_pages: int = 40) -> list[str]
     except ImportError:
         log.info("crawl4ai_unavailable", hint="pip install crawl4ai; using seed list fallback")
     except Exception as e:
-        log.warning("deep_crawl_failed", domain=base_domain, error=str(e))
+        log.warning("deep_crawl_failed", domain=base_url, error=str(e))
 
     # Fallback: known support path patterns
     paths = ["/", "/help", "/faq", "/returns", "/delivery", "/shipping",
              "/contact", "/about", "/customer-service", "/pages/faq",
              "/pages/returns", "/pages/delivery-information"]
-    return [f"https://{base_domain}{p}" for p in paths]
+    return [urljoin(base_url, p) for p in paths]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -407,8 +404,21 @@ async def _extract_batch_scrapegraph(urls: list[str], brand_name: str) -> list[t
     try:
         from scrapegraphai.graphs import SmartScraperMultiGraph
 
-        model, api_key = _litellm_model()
-        sg_config = {"llm": {"model": model, "api_key": api_key}, "headless": True, "verbose": False}
+        # ScrapeGraphAI uses openai-compatible config; for Azure supply base_url + api_version
+        if settings.llm_provider == "azure" and settings.azure_openai_api_key:
+            sg_config = {
+                "llm": {
+                    "model": f"azure_openai/{settings.azure_primary_deployment}",
+                    "api_key": settings.azure_openai_api_key,
+                    "base_url": settings.azure_openai_endpoint,
+                    "api_version": settings.azure_openai_api_version,
+                },
+                "headless": True,
+                "verbose": False,
+            }
+        else:
+            model, api_key = _litellm_model()
+            sg_config = {"llm": {"model": model, "api_key": api_key}, "headless": True, "verbose": False}
         prompt = (
             f"For each page about {brand_name}, extract: page_type (policy/faq/review/social/news/other), "
             "summary, key_facts, faq_pairs if present, policy_details if present, "
@@ -613,14 +623,14 @@ async def _write_to_graph(brand_id: str, url: str, extracted: dict) -> None:
 
 async def _write_to_pgvector(brand_id: str, url: str, extracted: dict) -> None:
     try:
-        import psycopg2
+        import psycopg
         parts = [extracted.get("summary") or ""]
         parts += [f"Q: {p['question']}\nA: {p['answer']}" for p in (extracted.get("faq_pairs") or [])]
         parts += [str(f) for f in (extracted.get("key_facts") or [])]
         content = "\n".join(parts).strip()
         if len(content) < 30:
             return
-        conn = psycopg2.connect(
+        conn = psycopg.connect(
             host=settings.postgres_host, port=settings.postgres_port,
             dbname=settings.postgres_db, user=settings.postgres_user,
             password=settings.postgres_password,
@@ -661,6 +671,11 @@ async def collect_brand_data(
     r = get_redis()
     dedup = DedupTracker(brand_id, r)
     ckpt = CheckpointManager(brand_id, r)
+
+    # Normalize base_domain → always a full URL with scheme
+    if not base_domain.startswith(("http://", "https://")):
+        base_domain = f"https://{base_domain}"
+    base_domain = base_domain.rstrip("/")
 
     # ── Resume logic ─────────────────────────────────────────────────────────
     state: CollectState | None = None
