@@ -425,9 +425,17 @@ async def _extract_batch_scrapegraph(urls: list[str], brand_name: str) -> list[t
             "review_data if present (rating, platform, complaints, praises), sentiment."
         )
         graph = SmartScraperMultiGraph(prompt=prompt, source=urls, config=sg_config)
-        # graph.run() uses asyncio.run() internally — must be offloaded to a thread
-        # so it doesn't conflict with FastAPI's running event loop
-        result = await asyncio.to_thread(graph.run)
+
+        # graph.run() uses asyncio.run() internally — run in a thread to avoid
+        # conflict with FastAPI's event loop. Suppress its internal stderr noise
+        # (LangChain JSON parse errors when the LLM returns NA instead of null).
+        import contextlib, io
+
+        def _run() -> object:
+            with contextlib.redirect_stderr(io.StringIO()):
+                return graph.run()
+
+        result = await asyncio.to_thread(_run)
 
         if isinstance(result, dict):
             return [(u, result[u]) for u in urls if u in result]
@@ -478,6 +486,9 @@ async def _extract_single_crawl4ai(url: str, brand_name: str) -> dict | None:
         return extracted[0] if isinstance(extracted, list) else extracted
     except ImportError:
         pass
+    except TypeError as e:
+        # ForwardRef Pydantic v2 compat bug in installed crawl4ai — always falls through
+        log.debug("crawl4ai_single_skipped", url=url, reason=str(e))
     except Exception as e:
         log.warning("crawl4ai_single_failed", url=url, error=str(e))
     return None

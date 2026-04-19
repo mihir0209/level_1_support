@@ -19,23 +19,37 @@ COPY . .
 # Install Python dependencies (production only)
 RUN uv pip install --system -e .
 
-# Patch litellm: some PyPI builds of 1.76.x ship an arize/__init__.py that
-# references SupportedPromptIntegrations.ARIZE_PHOENIX before the enum member
-# is defined. We remove the broken dict entry — we don't use Arize Phoenix.
+# Patch litellm post-install bugs:
+#  1. arize/__init__.py references ARIZE_PHOENIX enum member before it exists
+#  2. litellm_logging.py does `"key=" in api_base` when api_base is None
 RUN python3 - <<'EOF'
 import pathlib, sys
+
 for sp in sys.path:
-    p = pathlib.Path(sp) / "litellm/integrations/arize/__init__.py"
+    base = pathlib.Path(sp) / "litellm"
+    if not base.exists():
+        continue
+
+    # Patch 1: arize ARIZE_PHOENIX AttributeError
+    p = base / "integrations/arize/__init__.py"
     if p.exists():
         txt = p.read_text()
         if "ARIZE_PHOENIX" in txt:
-            fixed = "\n".join(
-                line for line in txt.splitlines()
-                if "ARIZE_PHOENIX" not in line
-            )
+            fixed = "\n".join(l for l in txt.splitlines() if "ARIZE_PHOENIX" not in l)
             p.write_text(fixed)
-            print(f"patched {p}")
-        break
+            print(f"patched arize __init__: {p}")
+
+    # Patch 2: logging TypeError when api_base is None
+    p2 = base / "litellm_core_utils/litellm_logging.py"
+    if p2.exists():
+        txt2 = p2.read_text()
+        if 'if "key=" in api_base:' in txt2:
+            p2.write_text(txt2.replace(
+                'if "key=" in api_base:',
+                'if api_base and "key=" in api_base:',
+            ))
+            print(f"patched litellm_logging: {p2}")
+    break
 EOF
 
 # Install Playwright + Chromium browser (used by crawl4ai and ScrapeGraphAI)
