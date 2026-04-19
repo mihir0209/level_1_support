@@ -436,19 +436,24 @@ async def _extract_batch_scrapegraph(urls: list[str], brand_name: str) -> list[t
         # redirect stdout to swallow any direct print() calls.
         import contextlib, io, logging as _log
 
-        class _SuppressLC(_log.Filter):
-            def filter(self, r: _log.LogRecord) -> bool:
-                return not r.name.startswith(("langchain", "scrapegraphai"))
-
         def _run() -> object:
-            root = _log.getLogger()
-            f = _SuppressLC()
-            root.addFilter(f)
+            # Silence all langchain*/scrapegraphai loggers:
+            # set propagate=False + NullHandler so records never reach root.
+            silenced: list[tuple[_log.Logger, bool, list]] = []
+            for name in list(_log.Logger.manager.loggerDict):
+                if name.startswith(("langchain", "scrapegraphai")):
+                    lgr = _log.getLogger(name)
+                    silenced.append((lgr, lgr.propagate, list(lgr.handlers)))
+                    lgr.propagate = False
+                    lgr.handlers = [_log.NullHandler()]
             try:
-                with contextlib.redirect_stdout(io.StringIO()):
+                with contextlib.redirect_stdout(io.StringIO()), \
+                     contextlib.redirect_stderr(io.StringIO()):
                     return graph.run()
             finally:
-                root.removeFilter(f)
+                for lgr, prop, handlers in silenced:
+                    lgr.propagate = prop
+                    lgr.handlers = handlers
 
         result = await asyncio.to_thread(_run)
 
