@@ -23,7 +23,7 @@ dependencies = [
     "swarms>=10.0.0",
 
     # LLM abstraction
-    "litellm>=1.76.0",
+    "litellm>=1.76.0,<1.79.0",
     "anthropic>=0.40.0",
     "openai>=1.0.0",
 
