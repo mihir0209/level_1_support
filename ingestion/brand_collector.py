@@ -410,7 +410,7 @@ async def _extract_batch_scrapegraph(urls: list[str], brand_name: str) -> list[t
                 "llm": {
                     "model": f"azure_openai/{settings.azure_primary_deployment}",
                     "api_key": settings.azure_openai_api_key,
-                    "base_url": settings.azure_openai_endpoint,
+                    "azure_endpoint": settings.azure_openai_endpoint,
                     "api_version": settings.azure_openai_api_version,
                 },
                 "headless": True,
