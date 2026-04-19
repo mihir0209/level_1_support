@@ -62,8 +62,8 @@ for sp in sys.path:
             ) + "\nDatadogInitParams = None  # patched\n")
             print(f"patched datadog __init__: {p_dd}")
 
-    # Patch 4: VertexAI ImportError — VertexAIModelRoute missing from common_utils.
-    # We don't use VertexAI; remove the broken import block from litellm/main.py.
+    # Patch 4: VertexAI ImportError — VertexAIModelRoute/VertexImageGeneration missing.
+    # We don't use VertexAI; remove the broken import block + instantiation.
     p_main = base / "main.py"
     if p_main.exists():
         txt_main = p_main.read_text()
@@ -73,15 +73,21 @@ for sp in sys.path:
             for line in txt_main.splitlines():
                 if marker in line:
                     skip = True
-                    out.append("# vertex_ai image_generation import removed (VertexAIModelRoute missing)")
+                    out.append("# (vertex_ai image_generation removed by patch)")
                     continue
                 if skip:
                     if line.strip() == ")":
                         skip = False
                     continue
+                # Also stub out the instantiation of the removed class
+                if "VertexImageGeneration()" in line or (
+                    "vertex_image_generation" in line and "=" in line
+                ):
+                    out.append("# " + line.strip() + "  # removed by patch")
+                    continue
                 out.append(line)
             p_main.write_text("\n".join(out))
-            print(f"patched litellm main.py: removed vertex_ai image_generation import")
+            print(f"patched litellm main.py: removed vertex_ai image_generation")
     break
 EOF
 
