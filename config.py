@@ -97,14 +97,12 @@ class Settings(BaseSettings):
     # Graphiti uses FalkorDB — same connection as knowledge graph
     graphiti_graph_name: str = Field(default="l1_user_memory")
 
-    # ── MemPalace ───────────────────────────────────────────────────────
-    mempalace_data_dir: str = Field(default="./data/mempalace")
-
     # ── App ─────────────────────────────────────────────────────────────
     app_host: str = Field(default="0.0.0.0")
     app_port: int = Field(default=8000)
     log_level: str = Field(default="INFO")
     environment: str = Field(default="development")
+    admin_api_key: str = Field(default="l1support-demo-key-2026")
 
     @property
     def is_production(self) -> bool:

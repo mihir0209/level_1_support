@@ -22,6 +22,8 @@ from typing import Any
 import structlog
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
 from prometheus_client import Counter, Histogram, generate_latest
 from pydantic import BaseModel
@@ -71,6 +73,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("scheduler_start_failed", error=str(e))
 
+    # Register demo tools API
+    from core.tools.api import router as demo_router
+    app.include_router(demo_router)
+
     yield
 
     # Shutdown scheduler
@@ -83,12 +89,32 @@ async def lifespan(app: FastAPI):
     log.info("shutdown")
 
 
+_OPENAPI_TAGS = [
+    {"name": "Chat",          "description": "Core chat/session lifecycle — start a session, send a message, get session state."},
+    {"name": "Graph",         "description": "FalkorDB knowledge graph — node counts, relationship types, brand subgraphs, raw Cypher queries."},
+    {"name": "Knowledge Base","description": "FAQs, policies, and pgvector semantic-search chunks stored across graph + Postgres."},
+    {"name": "Brands",        "description": "Brand registry — all 13 Boohoo-group brands with their `brand_id`, domains, and locales."},
+    {"name": "Operations",    "description": "CRM operations — customers, orders, returns, promos. **Auth:** `X-API-KEY` header. Default key: `l1support-demo-key-2026` (override via `ADMIN_API_KEY` env var)."},
+    {"name": "Sessions",      "description": "Active support sessions stored in Redis — list, inspect, filter by brand."},
+    {"name": "System",        "description": "Health check, Prometheus metrics, full system snapshot, scheduled ingestion jobs."},
+    {"name": "Integrations",  "description": "External tool connections — register company-provided MCP server URLs, REST API base URLs, and auth headers. Registered tools are injected into the agent at runtime."},
+    {"name": "Voice",         "description": "Twilio/Daily voice channel — inbound calls, dev room start, active call list."},
+]
+
 app = FastAPI(
     title="L1 Support AI — E-Commerce Platform",
-    description="AI-native L1 customer support for multi-brand e-commerce. "
-                "Chat → /chat | Sessions → /session/new | Admin → /admin/overview",
+    description=(
+        "AI-native L1 customer support for multi-brand e-commerce.\n\n"
+        "**Quick start:**\n"
+        "1. `POST /session/new` with a `brand` (e.g. `boohoo_uk`) → get `session_id`\n"
+        "2. `POST /chat` with `session_id` + `message`\n\n"
+        "**Operations endpoints** require `X-API-KEY` header. "
+        "Default value: `l1support-demo-key-2026` (set `ADMIN_API_KEY` env var to change).\n\n"
+        "**Visual dashboard:** [`/admin/ui`](/admin/ui)"
+    ),
     version="0.1.0",
     lifespan=lifespan,
+    openapi_tags=_OPENAPI_TAGS,
 )
 
 app.add_middleware(
@@ -97,6 +123,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve the admin visualizer at /admin/ui
+import os as _os
+_static_dir = _os.path.join(_os.path.dirname(__file__), "static")
+if _os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+
+@app.get("/admin/ui", include_in_schema=False)
+async def admin_ui():
+    """Admin visualizer — knowledge graph & system dashboard."""
+    return FileResponse(_os.path.join(_static_dir, "admin", "graph.html"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -185,7 +223,7 @@ def get_mock_customer(customer_id: str | None, brand_id: str) -> Customer | None
 # ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════
 
-@app.post("/session/new", response_model=NewSessionResponse)
+@app.post("/session/new", response_model=NewSessionResponse, tags=["Chat"])
 async def new_session(req: NewSessionRequest):
     """Create a new support session. Returns session_id for subsequent chat turns."""
     brand_entry = resolve_brand(req.brand)
@@ -208,7 +246,7 @@ async def new_session(req: NewSessionRequest):
     )
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat", response_model=ChatResponse, tags=["Chat"])
 async def chat(req: ChatRequest):
     """
     Process a single chat turn.
@@ -231,18 +269,17 @@ async def chat(req: ChatRequest):
     )
 
     # Build LangGraph state — convert stored dicts to HumanMessage objects
-    from langchain_core.messages import HumanMessage as HM, AIMessage as AM
     stored = session_data.get("messages", [])
     history_messages = []
     for m in stored:
         if isinstance(m, dict):
             if m.get("role") == "user":
-                history_messages.append(HM(content=m["content"]))
+                history_messages.append(HumanMessage(content=m["content"]))
             elif m.get("role") == "assistant":
-                history_messages.append(AM(content=m["content"]))
+                history_messages.append(AIMessage(content=m["content"]))
         else:
             history_messages.append(m)
-    history_messages.append(HM(content=req.message))
+    history_messages.append(HumanMessage(content=req.message))
 
     state = L1SupportState(
         session_id=req.session_id,
@@ -277,7 +314,7 @@ async def chat(req: ChatRequest):
 
     # Persist updated session state — convert BaseMessage objects to dicts
     updated_messages = [
-        *(m.content if isinstance(m, (HM, AM)) else m
+        *(m.content if isinstance(m, (HumanMessage, AIMessage)) else m
           for m in (session_data.get("messages", []) or [])),
         {"role": "user", "content": req.message},
         {"role": "assistant", "content": ai_response},
@@ -321,7 +358,7 @@ async def chat(req: ChatRequest):
     )
 
 
-@app.get("/session/{session_id}")
+@app.get("/session/{session_id}", tags=["Chat"])
 async def get_session_info(session_id: str) -> dict[str, Any]:
     data = await get_session(session_id)
     if not data:
@@ -330,7 +367,7 @@ async def get_session_info(session_id: str) -> dict[str, Any]:
     return {k: v for k, v in data.items() if k != "messages"}
 
 
-@app.post("/webhook/chatwoot")
+@app.post("/webhook/chatwoot", tags=["Chat"])
 async def chatwoot_webhook(request: Request):
     """
     Receive inbound messages from Chatwoot's webhook.
@@ -382,7 +419,7 @@ async def chatwoot_webhook(request: Request):
     return {"status": "processed", "session_id": session_id, "response": response.response}
 
 
-@app.get("/health")
+@app.get("/health", tags=["System"])
 async def health():
     graph_ok = verify_connectivity()
     from core.memory.session import get_redis
@@ -402,23 +439,22 @@ async def health():
     }
 
 
-@app.get("/metrics")
+@app.get("/metrics", tags=["System"])
 async def metrics():
     return PlainTextResponse(generate_latest(), media_type="text/plain")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ADMIN / VISUALIZATION ENDPOINTS
+# KNOWLEDGE GRAPH / ONTOLOGY / KB / SYSTEM ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-# ── Sub-routers ─────────────────────────────────────────────────────────────
-admin_router = APIRouter(prefix="/admin", tags=["Admin"])
+admin_router = APIRouter(prefix="/admin")
 
-# ── Knowledge Graph ─────────────────────────────────────────────────────────
-@admin_router.get("/graph/summary")
+# ── Graph endpoints ───────────────────────────────────────────────────────────
+@admin_router.get("/graph/summary", tags=["Graph"])
 async def graph_summary():
     """FalkorDB graph overview — node counts by label."""
     try:
@@ -430,7 +466,7 @@ async def graph_summary():
         raise HTTPException(status_code=503, detail=str(e))
 
 
-@admin_router.get("/graph/relationships")
+@admin_router.get("/graph/relationships", tags=["Graph"])
 async def graph_relationships():
     """All relationship types with counts."""
     try:
@@ -443,9 +479,9 @@ async def graph_relationships():
         raise HTTPException(status_code=503, detail=str(e))
 
 
-@admin_router.get("/graph/brand/{brand_id}")
+@admin_router.get("/graph/brand/{brand_id}", tags=["Graph"])
 async def graph_brand(brand_id: str):
-    """All nodes connected to a specific brand — by brand_id property."""
+    """All nodes connected to a specific brand. Use `/admin/brands` to get valid `brand_id` values."""
     try:
         _, graph = get_graph_client()
         result = graph.query(
@@ -458,7 +494,7 @@ async def graph_brand(brand_id: str):
         raise HTTPException(status_code=503, detail=str(e))
 
 
-@admin_router.get("/graph/issues")
+@admin_router.get("/graph/issues", tags=["Graph"])
 async def graph_issues():
     """Issue types with their resolution paths."""
     try:
@@ -473,9 +509,9 @@ async def graph_issues():
         raise HTTPException(status_code=503, detail=str(e))
 
 
-@admin_router.get("/graph/query")
+@admin_router.get("/graph/query", tags=["Graph"])
 async def graph_query(q: str):
-    """Free-text Cypher query against the knowledge graph."""
+    """Raw Cypher query against the knowledge graph. Example: `MATCH (n:Brand) RETURN n LIMIT 5`"""
     try:
         _, graph = get_graph_client()
         result = graph.query(q)
@@ -484,10 +520,9 @@ async def graph_query(q: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# ── Ontology Schema ────────────────────────────────────────────────────────────
-@admin_router.get("/ontology")
+@admin_router.get("/ontology", tags=["Graph"])
 async def ontology_overview():
-    """High-level ontology: labels, properties, and relationships."""
+    """Full ontology schema — node labels, relationship types, property keys."""
     try:
         _, graph = get_graph_client()
         labels = graph.query("CALL db.labels()").result_set
@@ -502,9 +537,9 @@ async def ontology_overview():
         raise HTTPException(status_code=503, detail=str(e))
 
 
-@admin_router.get("/ontology/brand/{brand_id}")
+@admin_router.get("/ontology/brand/{brand_id}", tags=["Graph"])
 async def ontology_brand(brand_id: str):
-    """Full brand subtree — policies, issue types, FAQs, resolution steps."""
+    """Brand subtree — policies, issue types, and sample FAQs for a given brand_id."""
     try:
         _, graph = get_graph_client()
         policies = graph.query(
@@ -529,10 +564,10 @@ async def ontology_brand(brand_id: str):
         raise HTTPException(status_code=503, detail=str(e))
 
 
-# ── Knowledge Base ──────────────────────────────────────────────────────────
-@admin_router.get("/kb/faqs")
+# ── Knowledge Base endpoints ──────────────────────────────────────────────────
+@admin_router.get("/kb/faqs", tags=["Knowledge Base"])
 async def kb_faqs(brand_id: str | None = None, category: str | None = None):
-    """FAQ content from FalkorDB — optionally filtered by brand and category."""
+    """FAQs from FalkorDB — filter by `brand_id` and/or `category`."""
     try:
         _, graph = get_graph_client()
         where = "WHERE 1=1"
@@ -550,9 +585,9 @@ async def kb_faqs(brand_id: str | None = None, category: str | None = None):
         raise HTTPException(status_code=503, detail=str(e))
 
 
-@admin_router.get("/kb/policies")
+@admin_router.get("/kb/policies", tags=["Knowledge Base"])
 async def kb_policies(brand_id: str | None = None):
-    """Policy summaries from FalkorDB."""
+    """Policies from FalkorDB — optionally filtered by `brand_id`."""
     try:
         _, graph = get_graph_client()
         where = f"WHERE p.brand_id = '{brand_id}'" if brand_id else ""
@@ -565,9 +600,9 @@ async def kb_policies(brand_id: str | None = None):
         raise HTTPException(status_code=503, detail=str(e))
 
 
-@admin_router.get("/kb/pgvector/chunks")
+@admin_router.get("/kb/pgvector/chunks", tags=["Knowledge Base"])
 async def kb_chunks(brand_id: str | None = None, chunk_type: str | None = None, limit: int = 20):
-    """Knowledge chunks from Postgres pgvector — semantic search base."""
+    """Semantic-search chunks from Postgres pgvector — the base for vector retrieval."""
     import psycopg2
     conn = psycopg2.connect(
         host=settings.postgres_host,
@@ -591,10 +626,48 @@ async def kb_chunks(brand_id: str | None = None, chunk_type: str | None = None, 
         conn.close()
 
 
-# ── Sessions ────────────────────────────────────────────────────────────────
-@admin_router.get("/sessions")
+# ── Brand endpoints ───────────────────────────────────────────────────────────
+@admin_router.get("/brands", tags=["Brands"])
+async def list_brands():
+    """All 13 registered brands — `brand_id` is the key used in every other endpoint."""
+    from brands.registry import BRAND_REGISTRY
+    return {
+        "count": len(BRAND_REGISTRY),
+        "brands": [
+            {
+                "brand_id": b.brand_id,
+                "name": b.name,
+                "domains": b.domains,
+                "locales": b.locales,
+                "default_region": b.default_region,
+                "chatwoot_inbox_id": b.chatwoot_inbox_id,
+            }
+            for b in BRAND_REGISTRY
+        ],
+    }
+
+
+@admin_router.get("/brands/{brand_id}", tags=["Brands"])
+async def get_brand_detail(brand_id: str):
+    """Single brand detail. Call `GET /admin/brands` first to get valid `brand_id` values."""
+    from brands.registry import get_brand_by_id
+    entry = get_brand_by_id(brand_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not found. GET /admin/brands lists all valid brand_ids.")
+    return {
+        "brand_id": entry.brand_id,
+        "name": entry.name,
+        "domains": entry.domains,
+        "locales": entry.locales,
+        "default_region": entry.default_region,
+        "chatwoot_inbox_id": entry.chatwoot_inbox_id,
+    }
+
+
+# ── Session endpoints ─────────────────────────────────────────────────────────
+@admin_router.get("/sessions", tags=["Sessions"])
 async def list_sessions(brand_id: str | None = None, limit: int = 50):
-    """All active sessions from Redis — optionally filtered by brand."""
+    """All active sessions in Redis — optionally filtered by `brand_id`."""
     from core.memory.session import get_redis
     r = get_redis()
     session_keys = []
@@ -618,7 +691,7 @@ async def list_sessions(brand_id: str | None = None, limit: int = 50):
     return {"count": len(sessions), "sessions": sessions}
 
 
-@admin_router.get("/sessions/{session_id}")
+@admin_router.get("/sessions/{session_id}", tags=["Sessions"])
 async def get_session_detail(session_id: str):
     """Full session state including message history."""
     data = await get_session(session_id)
@@ -627,37 +700,12 @@ async def get_session_detail(session_id: str):
     return data
 
 
-# ── Brand Registry ──────────────────────────────────────────────────────────
-@admin_router.get("/brands")
-async def list_brands():
-    """All registered brands in the registry."""
-    from brands.registry import BRAND_REGISTRY
-    return {
-        "count": len(BRAND_REGISTRY),
-        "brands": [
-            {"brand_id": b.brand_id, "name": b.name, "domains": b.domains, "locale": b.default_region, "chatwoot_inbox": b.chatwoot_inbox_id}
-            for b in BRAND_REGISTRY
-        ],
-    }
-
-
-@admin_router.get("/brands/{brand_id}")
-async def get_brand_detail(brand_id: str):
-    """Single brand entry."""
-    from brands.registry import get_brand_by_id
-    entry = get_brand_by_id(brand_id)
-    if not entry:
-        raise HTTPException(status_code=404, detail="Brand not found")
-    return {"brand_id": entry.brand_id, "name": entry.name, "domains": entry.domains, "locale": entry.default_region, "chatwoot_inbox": entry.chatwoot_inbox_id}
-
-
-# ── System Overview ─────────────────────────────────────────────────────────
-@admin_router.get("/overview")
+# ── System endpoints ──────────────────────────────────────────────────────────
+@admin_router.get("/overview", tags=["System"])
 async def system_overview():
-    """Full system snapshot for dashboard/demo — all stores at a glance."""
+    """Full system snapshot — all services, graph stats, KB chunk counts, active sessions."""
     from core.memory.session import get_redis
 
-    # Graph stats
     graph_ok, graph_stats = False, {}
     try:
         _, graph = get_graph_client()
@@ -671,7 +719,6 @@ async def system_overview():
     except Exception:
         pass
 
-    # Redis sessions
     session_count = 0
     try:
         r = get_redis()
@@ -680,7 +727,6 @@ async def system_overview():
     except Exception:
         pass
 
-    # Postgres KB
     pg_stats = {}
     try:
         import psycopg2
@@ -728,7 +774,7 @@ class VoiceStartRequest(BaseModel):
     customer_name: str | None = None
 
 
-@app.post("/voice/incoming")
+@app.post("/voice/incoming", tags=["Voice"])
 async def voice_incoming(request: Request):
     """
     Twilio webhook — receives inbound call and returns TwiML to connect to Daily.
@@ -752,7 +798,7 @@ async def voice_incoming(request: Request):
     return PlainTextResponse(twiml, media_type="text/xml")
 
 
-@app.post("/voice/start")
+@app.post("/voice/start", tags=["Voice"])
 async def voice_start(req: VoiceStartRequest):
     """Dev endpoint — start a voice call session and return the Daily room URL to join."""
     brand_entry = resolve_brand(req.brand)
@@ -764,7 +810,7 @@ async def voice_start(req: VoiceStartRequest):
     return call_info
 
 
-@app.get("/voice/active")
+@app.get("/voice/active", tags=["Voice"])
 async def voice_active():
     """List all active voice calls (admin)."""
     from channels.voice.router import get_active_calls
@@ -780,7 +826,7 @@ class IngestRequest(BaseModel):
     url: str | None = None  # if None: full brand crawl
 
 
-@app.post("/admin/ingest")
+@app.post("/admin/ingest", tags=["System"])
 async def admin_ingest(req: IngestRequest):
     """
     Trigger a crawl-to-graph ingestion run.
@@ -803,7 +849,7 @@ async def admin_ingest(req: IngestRequest):
         return await trigger_crawl_now(brand_id)
 
 
-@app.get("/admin/jobs")
+@app.get("/admin/jobs", tags=["System"])
 async def admin_jobs():
     """List all scheduled ingestion jobs."""
     from ingestion.scheduler import list_jobs
@@ -812,6 +858,104 @@ async def admin_jobs():
 
 # ── Import SessionOutcome for the chat endpoint ────────────────────────────
 from core.ontology.models import SessionOutcome  # noqa: E402 — needed after app definition
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# INTEGRATIONS — external MCP servers & REST APIs provided by companies
+# ═══════════════════════════════════════════════════════════════════════════
+# Companies provide their own MCP server URLs + auth headers.
+# Register them here; the agent will call those tools at runtime.
+
+import json as _json
+
+_integrations_router = APIRouter(prefix="/integrations", tags=["Integrations"])
+
+# In-memory store for the demo; swap for Redis/DB in production
+_registered_integrations: dict[str, dict] = {}
+
+
+class MCPServerRegistration(BaseModel):
+    name: str
+    url: str
+    description: str = ""
+    auth_headers: dict[str, str] = {}
+    type: str = "mcp"          # "mcp" | "rest"
+    extra: dict[str, Any] = {}  # e.g. {"openapi_spec_url": "..."}
+
+
+@_integrations_router.post("/mcp", summary="Register an external MCP server")
+async def register_mcp_server(reg: MCPServerRegistration):
+    """
+    Register a company-provided MCP server.
+
+    - **name**: unique identifier (e.g. `acme_crm`)
+    - **url**: SSE endpoint URL the company gave you (e.g. `https://api.acme.io/mcp/sse`)
+    - **auth_headers**: any auth headers required (e.g. `{"Authorization": "Bearer <token>"}`)
+    - **type**: `mcp` for Model Context Protocol servers, `rest` for plain REST APIs
+    """
+    _registered_integrations[reg.name] = reg.model_dump()
+    log.info("integration_registered", name=reg.name, url=reg.url, type=reg.type)
+    return {"registered": reg.name, "total": len(_registered_integrations)}
+
+
+@_integrations_router.get("/mcp", summary="List registered external integrations")
+async def list_mcp_servers():
+    """List all registered external MCP / REST integrations."""
+    return {
+        "count": len(_registered_integrations),
+        "integrations": [
+            {
+                "name": v["name"],
+                "url": v["url"],
+                "type": v["type"],
+                "description": v["description"],
+                # never echo secrets back — just confirm headers are set
+                "auth_headers_configured": list(v["auth_headers"].keys()),
+            }
+            for v in _registered_integrations.values()
+        ],
+    }
+
+
+@_integrations_router.delete("/mcp/{name}", summary="Remove a registered integration")
+async def delete_mcp_server(name: str):
+    """Remove an external integration by name."""
+    if name not in _registered_integrations:
+        raise HTTPException(status_code=404, detail=f"Integration '{name}' not found")
+    del _registered_integrations[name]
+    return {"removed": name}
+
+
+@_integrations_router.get("/mcp/{name}/probe", summary="Probe an external MCP server for its tool list")
+async def probe_mcp_server(name: str):
+    """
+    Attempt to fetch the tool list from a registered MCP server.
+    Calls the server's `/tools/list` endpoint (or equivalent) using the stored auth headers.
+    """
+    reg = _registered_integrations.get(name)
+    if not reg:
+        raise HTTPException(status_code=404, detail=f"Integration '{name}' not found. Register it first via POST /integrations/mcp.")
+
+    import httpx
+    headers = reg.get("auth_headers", {})
+    base_url = reg["url"].rstrip("/")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                base_url,
+                headers={"Content-Type": "application/json", **headers},
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            tools = data.get("result", {}).get("tools", [])
+            return {"integration": name, "tool_count": len(tools), "tools": tools}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Could not reach '{name}' at {base_url}: {e}")
+
+
+app.include_router(_integrations_router)
 
 
 if __name__ == "__main__":

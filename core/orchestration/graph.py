@@ -290,6 +290,12 @@ def check_resolution_routing(state: L1SupportState) -> Literal["tools", "escalat
     if state.confidence < LOW_CONFIDENCE_THRESHOLD and state.turn_count > 1:
         return "escalate"
 
+    # No tool calls available AND confidence too low to self-resolve on first response:
+    # escalate immediately rather than looping with unhelpful replies.
+    tool_manifest = (state.context_package.tool_manifest if state.context_package else [])
+    if not tool_manifest and state.confidence < LOW_CONFIDENCE_THRESHOLD:
+        return "escalate"
+
     # Agent explicitly marked as resolved via [RESOLVED] signal in response
     if "[resolved]" in content:
         return "close"
