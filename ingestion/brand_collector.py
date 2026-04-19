@@ -427,13 +427,20 @@ async def _extract_batch_scrapegraph(urls: list[str], brand_name: str) -> list[t
         graph = SmartScraperMultiGraph(prompt=prompt, source=urls, config=sg_config)
 
         # graph.run() uses asyncio.run() internally — run in a thread to avoid
-        # conflict with FastAPI's event loop. Suppress its internal stderr noise
-        # (LangChain JSON parse errors when the LLM returns NA instead of null).
-        import contextlib, io
+        # conflict with FastAPI's event loop.
+        # Silence LangChain's output-parser logger during execution: the LLM
+        # often returns 'NA' strings instead of null, causing noisy parse errors
+        # that are non-fatal (we fall through to httpx+LLM per URL).
+        import logging as _logging
 
         def _run() -> object:
-            with contextlib.redirect_stderr(io.StringIO()):
+            lc = _logging.getLogger("langchain")
+            prev = lc.level
+            lc.setLevel(_logging.CRITICAL)
+            try:
                 return graph.run()
+            finally:
+                lc.setLevel(prev)
 
         result = await asyncio.to_thread(_run)
 
