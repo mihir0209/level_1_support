@@ -19,11 +19,8 @@ dependencies = [
     "langchain-openai>=0.2.0",
     "langchain-community>=0.3.0",
 
-    # Multi-agent
-    "swarms>=10.0.0",
-
     # LLM abstraction
-    "litellm==1.76.1",
+    "litellm>=1.56.0,<1.70.0",
     "anthropic>=0.40.0",
     "openai>=1.0.0",
 
@@ -68,6 +65,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+multiagent = [
+    "swarms>=10.0.0",
+]
 voice = [
     "pipecat-ai[daily,deepgram,elevenlabs,anthropic,silero]>=1.0.0",
     "twilio>=9.3.0",

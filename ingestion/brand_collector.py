@@ -215,13 +215,16 @@ class CheckpointManager:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _litellm_model() -> tuple[str, str]:
-    """Return (model_string, api_key) for litellm routing."""
+    """Return (model_string, api_key) for litellm routing.
+    Always use provider-prefixed model strings so litellm routes correctly
+    regardless of whether it knows the specific model name by version.
+    """
     if settings.llm_provider == "anthropic" and settings.anthropic_api_key:
-        return settings.primary_model, settings.anthropic_api_key
+        return f"anthropic/{settings.primary_model}", settings.anthropic_api_key
     elif settings.llm_provider == "azure" and settings.azure_openai_api_key:
         return f"azure/{settings.azure_primary_deployment}", settings.azure_openai_api_key
     else:
-        return settings.openai_primary_model, settings.openai_api_key
+        return f"openai/{settings.openai_primary_model}", settings.openai_api_key
 
 
 async def _llm_extract(text: str, brand_name: str, url: str) -> dict | None:

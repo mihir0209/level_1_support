@@ -19,8 +19,9 @@ COPY . .
 # Install Python dependencies (production only)
 RUN uv pip install --system -e .
 
-# Patch litellm post-install bugs:
-#  1. arize/__init__.py references ARIZE_PHOENIX enum member before it exists
+# Patch litellm post-install bugs (defensive — applies only if the broken
+# code is present, so safe across litellm versions):
+#  1. arize/__init__.py may reference ARIZE_PHOENIX before it's in the enum
 #  2. litellm_logging.py does `"key=" in api_base` when api_base is None
 RUN python3 - <<'EOF'
 import pathlib, sys
@@ -49,6 +50,21 @@ for sp in sys.path:
                 'if api_base and "key=" in api_base:',
             ))
             print(f"patched litellm_logging: {p2}")
+
+    # Patch 3: VertexAI image generation ImportError (VertexAIModelRoute missing)
+    p3 = base / "llms/vertex_ai/image_generation/__init__.py"
+    if p3.exists():
+        txt3 = p3.read_text()
+        if "VertexAIModelRoute" in txt3 and "from litellm.llms.vertex_ai.common_utils" in txt3:
+            # Wrap the problematic import in a try/except
+            p3.write_text(txt3.replace(
+                "from litellm.llms.vertex_ai.common_utils import (",
+                "try:\n    from litellm.llms.vertex_ai.common_utils import (",
+            ).replace(
+                "    VertexAIModelRoute,\n)",
+                "    VertexAIModelRoute,\n)\nexcept ImportError:\n    VertexAIModelRoute = None",
+            ))
+            print(f"patched vertex_ai image_generation __init__: {p3}")
     break
 EOF
 
