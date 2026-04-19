@@ -79,11 +79,12 @@ for sp in sys.path:
                     if line.strip() == ")":
                         skip = False
                     continue
-                # Also stub out the instantiation of the removed class
+                # Stub the instantiation — keep the name defined as None so
+                # `from .main import *` still finds vertex_image_generation
                 if "VertexImageGeneration()" in line or (
                     "vertex_image_generation" in line and "=" in line
                 ):
-                    out.append("# " + line.strip() + "  # removed by patch")
+                    out.append("vertex_image_generation = None  # patched")
                     continue
                 out.append(line)
             p_main.write_text("\n".join(out))
