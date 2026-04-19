@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System dependencies
+# System dependencies (libpq for psycopg, build tools for native extensions)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libpq-dev \
@@ -16,8 +16,12 @@ RUN pip install uv
 COPY pyproject.toml .
 COPY . .
 
-# Install dependencies (production only)
+# Install Python dependencies (production only)
 RUN uv pip install --system -e .
+
+# Install Playwright + Chromium browser (used by crawl4ai and ScrapeGraphAI)
+# --with-deps installs OS-level libraries (libglib, libnss, etc.) automatically
+RUN playwright install chromium --with-deps
 
 # Create data directories
 RUN mkdir -p /app/data/mempalace
