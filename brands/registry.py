@@ -100,13 +100,25 @@ for entry in BRAND_REGISTRY:
 
 
 def resolve_brand(identifier: str) -> BrandEntry | None:
-    """
-    Resolve a brand from any identifier: brand_id, domain, or subdomain.
-    Returns None if not found.
-    """
+    """Resolve a brand from any identifier: brand_id, domain, or subdomain."""
     identifier = identifier.lower().strip()
     return _by_id.get(identifier) or _by_domain.get(identifier)
 
 
 def get_brand_by_id(brand_id: str) -> BrandEntry | None:
     return _by_id.get(brand_id)
+
+
+def register_brand(entry: BrandEntry) -> bool:
+    """
+    Dynamically register a new brand at runtime.
+    Adds to the in-memory registry and lookup indexes.
+    Returns True if newly added, False if brand_id already existed (no-op).
+    """
+    if entry.brand_id in _by_id:
+        return False
+    BRAND_REGISTRY.append(entry)
+    _by_id[entry.brand_id] = entry
+    for domain in entry.domains:
+        _by_domain[domain.lower()] = entry
+    return True

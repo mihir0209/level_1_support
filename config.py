@@ -77,8 +77,9 @@ class Settings(BaseSettings):
     langchain_tracing_v2: str = Field(default="false")
     otel_exporter_otlp_endpoint: str = Field(default="http://localhost:4317")
 
-    # ── Crawling ────────────────────────────────────────────────────────
+    # ── Crawling / Search ───────────────────────────────────────────────
     firecrawl_api_key: str = Field(default="")
+    exa_api_key: str = Field(default="", description="Exa neural search API — used for news/review/social discovery")
 
     # ── Voice / Telephony (Phase 3) ─────────────────────────────────────
     twilio_account_sid: str = Field(default="")

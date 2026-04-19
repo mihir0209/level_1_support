@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
 from pydantic import BaseModel
 
 from brands.registry import BRAND_REGISTRY, get_brand_by_id
@@ -119,11 +119,22 @@ def get_brand_api(brand_id: str, _auth: str = Depends(verify_api_key)):
 
 @router.get("/customers", response_model=CustomerListResponse)
 def list_customers(
-    brand_id: str | None = None,
+    brand_id: str | None = Query(
+        default=None,
+        description="Filter by brand_id. Call `GET /api/v1/brands` to see all valid brand_ids (e.g. `boohoo_uk`, `plt_uk`, `karenmillen_uk`).",
+        example="boohoo_uk",
+    ),
     limit: int = Query(default=50, le=200),
     _auth: str = Depends(verify_api_key),
 ):
-    """List all customers (unique customer_ids from order history)."""
+    """
+    List customers derived from order history.
+
+    **Available demo brand_ids:** `boohoo_uk` · `plt_uk` · `karenmillen_uk`
+    (call `GET /api/v1/brands` for the full list)
+
+    **Known demo customer_ids:** `cust_001` (boohoo_uk) · `cust_002` (plt_uk) · `cust_003` (karenmillen_uk)
+    """
     seen: dict[str, dict] = {}
     for order in _MOCK_ORDERS.values():
         if brand_id and order["brand_id"] != brand_id:
@@ -145,10 +156,13 @@ def list_customers(
 
 @router.get("/customers/{customer_id}")
 def get_customer(
-    customer_id: str,
+    customer_id: str = Path(
+        description="Customer ID. Demo values: `cust_001` (boohoo_uk), `cust_002` (plt_uk), `cust_003` (karenmillen_uk).",
+        example="cust_001",
+    ),
     _auth: str = Depends(verify_api_key),
 ):
-    """Full customer profile — all orders and returns."""
+    """Full customer profile — all orders and returns. Demo IDs: `cust_001`, `cust_002`, `cust_003`."""
     orders = [o for o in _MOCK_ORDERS.values() if o["customer_id"] == customer_id]
     returns = [r for r in _MOCK_RETURNS.values() if r["customer_id"] == customer_id]
     if not orders:

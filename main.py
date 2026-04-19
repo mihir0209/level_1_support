@@ -14,6 +14,7 @@ Chatwoot webhook integration:
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -52,6 +53,24 @@ SESSIONS_TOTAL = Counter("l1_sessions_total", "Total sessions created", ["brand_
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("startup", environment=settings.environment)
+
+    # Restore dynamically registered brands from Redis
+    try:
+        import json as _j
+        from core.memory.session import get_redis
+        from brands.registry import BrandEntry, register_brand
+        _r = get_redis()
+        stored = await _r.hgetall("brand_registry")
+        for _raw in stored.values():
+            try:
+                _d = _j.loads(_raw)
+                register_brand(BrandEntry(**_d))
+            except Exception:
+                pass
+        if stored:
+            log.info("dynamic_brands_restored", count=len(stored))
+    except Exception as e:
+        log.warning("dynamic_brands_restore_failed", error=str(e))
 
     # Verify graph connectivity and seed data on startup
     if verify_connectivity():
@@ -627,9 +646,19 @@ async def kb_chunks(brand_id: str | None = None, chunk_type: str | None = None, 
 
 
 # ── Brand endpoints ───────────────────────────────────────────────────────────
+
+class BrandRegisterRequest(BaseModel):
+    brand_id: str
+    name: str
+    domains: list[str]
+    locales: list[str] = ["en-GB"]
+    default_region: str = "UK"
+    chatwoot_inbox_id: int | None = None
+
+
 @admin_router.get("/brands", tags=["Brands"])
 async def list_brands():
-    """All 13 registered brands — `brand_id` is the key used in every other endpoint."""
+    """All registered brands — `brand_id` is the key used in every other endpoint."""
     from brands.registry import BRAND_REGISTRY
     return {
         "count": len(BRAND_REGISTRY),
@@ -647,9 +676,58 @@ async def list_brands():
     }
 
 
+@admin_router.post("/brands", tags=["Brands"], status_code=201)
+async def add_brand(req: BrandRegisterRequest):
+    """
+    Register a new brand.
+
+    After registration the brand_id is immediately usable in `/chat`, `/session/new`,
+    and all other endpoints. The entry is persisted to Redis so it survives restarts.
+
+    To also seed the knowledge graph with ontology data, call
+    `POST /admin/ingest` with the new `brand` value.
+    """
+    from brands.registry import BrandEntry, register_brand
+    entry = BrandEntry(
+        brand_id=req.brand_id,
+        name=req.name,
+        domains=req.domains,
+        locales=req.locales,
+        default_region=req.default_region,
+        chatwoot_inbox_id=req.chatwoot_inbox_id,
+    )
+    added = register_brand(entry)
+    if not added:
+        raise HTTPException(status_code=409, detail=f"Brand '{req.brand_id}' already exists.")
+
+    # Persist to Redis so dynamic brands survive restarts
+    try:
+        import json
+        from core.memory.session import get_redis
+        r = get_redis()
+        await r.hset("brand_registry", req.brand_id, json.dumps({
+            "brand_id": req.brand_id,
+            "name": req.name,
+            "domains": req.domains,
+            "locales": req.locales,
+            "default_region": req.default_region,
+            "chatwoot_inbox_id": req.chatwoot_inbox_id,
+        }))
+    except Exception as e:
+        log.warning("brand_redis_persist_failed", brand_id=req.brand_id, error=str(e))
+
+    log.info("brand_registered", brand_id=req.brand_id, name=req.name, domains=req.domains)
+    return {
+        "registered": True,
+        "brand_id": req.brand_id,
+        "name": req.name,
+        "next_step": f"Call POST /admin/ingest with brand={req.brand_id} to seed the knowledge graph.",
+    }
+
+
 @admin_router.get("/brands/{brand_id}", tags=["Brands"])
 async def get_brand_detail(brand_id: str):
-    """Single brand detail. Call `GET /admin/brands` first to get valid `brand_id` values."""
+    """Single brand detail. Call `GET /admin/brands` first to see valid `brand_id` values."""
     from brands.registry import get_brand_by_id
     entry = get_brand_by_id(brand_id)
     if not entry:
@@ -759,6 +837,86 @@ async def system_overview():
         "active_sessions": session_count,
         "registered_brands": len(BRAND_REGISTRY),
     }
+
+
+# ── Brand data collection endpoints ──────────────────────────────────────────
+
+class CollectRequest(BaseModel):
+    resume: bool = True
+    max_urls: int = 200
+    concurrency: int = 5
+
+
+@admin_router.post("/brands/{brand_id}/collect", tags=["Brands"])
+async def trigger_brand_collection(brand_id: str, req: CollectRequest = CollectRequest()):
+    """
+    Trigger automated internet data collection for a registered brand.
+
+    **What it does:**
+    1. Crawls the brand's own support pages (returns, FAQs, policies, about)
+    2. Searches the web for news, reviews, social mentions about the brand
+       (uses Exa API if `EXA_API_KEY` is set; falls back to DuckDuckGo)
+    3. Extracts structured data from every page using crawl4ai + LLM
+    4. Writes FAQs, policies, reviews, mentions to FalkorDB knowledge graph
+    5. Writes searchable text chunks to Postgres pgvector
+
+    **Deduplication:** URLs are hashed (SHA-256) in Redis — already-seen pages are skipped.
+
+    **Resume:** If `resume=true` (default), a failed/interrupted run continues from where it left off.
+    Set `resume=false` to start completely fresh.
+
+    Check progress with `GET /admin/brands/{brand_id}/collect/status`.
+    """
+    from brands.registry import get_brand_by_id
+    entry = get_brand_by_id(brand_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not found. Register it first via POST /admin/brands.")
+
+    base_domain = entry.domains[0] if entry.domains else brand_id
+
+    async def _run_in_background():
+        from ingestion.brand_collector import collect_brand_data
+        try:
+            await collect_brand_data(
+                brand_id=brand_id,
+                brand_name=entry.name,
+                base_domain=base_domain,
+                resume=req.resume,
+                max_urls=req.max_urls,
+                concurrency=req.concurrency,
+            )
+        except Exception as e:
+            log.error("brand_collection_failed", brand_id=brand_id, error=str(e))
+
+    asyncio.create_task(_run_in_background())
+
+    return {
+        "status": "started",
+        "brand_id": brand_id,
+        "brand_name": entry.name,
+        "base_domain": base_domain,
+        "resume": req.resume,
+        "max_urls": req.max_urls,
+        "message": f"Collection running in background. Poll GET /admin/brands/{brand_id}/collect/status for progress.",
+    }
+
+
+@admin_router.get("/brands/{brand_id}/collect/status", tags=["Brands"])
+async def brand_collection_status(brand_id: str):
+    """
+    Check the current data collection status for a brand.
+
+    Returns phase (seed → discover → fetch → done), URL counts, and timestamp.
+    Returns 404 if no collection has been started for this brand.
+    """
+    from ingestion.brand_collector import get_collection_status
+    status = await get_collection_status(brand_id)
+    if not status:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No collection started for '{brand_id}'. Call POST /admin/brands/{brand_id}/collect first.",
+        )
+    return status
 
 
 # Register admin router
