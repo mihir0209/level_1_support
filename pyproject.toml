@@ -20,7 +20,7 @@ dependencies = [
     "langchain-community>=0.3.0",
 
     # LLM abstraction
-    "litellm>=1.56.0,<1.70.0",
+    "litellm==1.76.1",
     "anthropic>=0.40.0",
     "openai>=1.0.0",
 

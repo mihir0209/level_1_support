@@ -51,7 +51,18 @@ for sp in sys.path:
             ))
             print(f"patched litellm_logging: {p2}")
 
-    # Patch 3: VertexAI ImportError — VertexAIModelRoute missing from common_utils.
+    # Patch 3: DatadogInitParams missing — comment out the broken import
+    p_dd = base / "integrations/datadog/__init__.py"
+    if p_dd.exists():
+        txt_dd = p_dd.read_text()
+        if "DatadogInitParams" in txt_dd and "cannot import" not in txt_dd:
+            p_dd.write_text("\n".join(
+                "# " + l if "DatadogInitParams" in l else l
+                for l in txt_dd.splitlines()
+            ) + "\nDatadogInitParams = None  # patched\n")
+            print(f"patched datadog __init__: {p_dd}")
+
+    # Patch 4: VertexAI ImportError — VertexAIModelRoute missing from common_utils.
     # We don't use VertexAI; remove the broken import block from litellm/main.py.
     p_main = base / "main.py"
     if p_main.exists():
