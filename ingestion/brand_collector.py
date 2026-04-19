@@ -426,21 +426,25 @@ async def _extract_batch_scrapegraph(urls: list[str], brand_name: str) -> list[t
         )
         graph = SmartScraperMultiGraph(prompt=prompt, source=urls, config=sg_config)
 
-        # graph.run() uses asyncio.run() internally — run in a thread to avoid
-        # conflict with FastAPI's event loop.
-        # Silence LangChain's output-parser logger during execution: the LLM
-        # often returns 'NA' strings instead of null, causing noisy parse errors
-        # that are non-fatal (we fall through to httpx+LLM per URL).
-        import logging as _logging
+        # graph.run() uses asyncio.run() internally — run in a thread.
+        # Also silence LangChain/ScrapeGraphAI output: the LLM often returns
+        # 'NA' strings instead of null, triggering noisy but non-fatal parse
+        # errors. We silence all langchain*/scrapegraphai loggers and redirect
+        # stdout so any remaining print() calls are also swallowed.
+        import contextlib, io, logging as _log
 
         def _run() -> object:
-            lc = _logging.getLogger("langchain")
-            prev = lc.level
-            lc.setLevel(_logging.CRITICAL)
+            saved: dict[str, int] = {}
+            for name, lgr in list(_log.Logger.manager.loggerDict.items()):
+                if name.startswith(("langchain", "scrapegraphai")) and isinstance(lgr, _log.Logger):
+                    saved[name] = lgr.level
+                    lgr.setLevel(_log.CRITICAL)
             try:
-                return graph.run()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    return graph.run()
             finally:
-                lc.setLevel(prev)
+                for name, lvl in saved.items():
+                    _log.getLogger(name).setLevel(lvl)
 
         result = await asyncio.to_thread(_run)
 
