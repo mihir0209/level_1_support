@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L1 Support — Knowledge Graph &amp; Ontology Visualizer</title>
+  <style>
+    :root {
+      --bg: #0a0e17;
+      --panel: #111827;
+      --border: #1f2937;
+      --text: #f9fafb;
+      --muted: #9ca3af;
+      --accent: #6366f1;
+      --accent2: #22d3ee;
+      --green: #10b981;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --blue: #3b82f6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+    header { display: flex; align-items: center; justify-content: space-between; padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top: 0; z-index: 100; }
+    header h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.02em; }
+    header .tag { font-size: 11px; background: var(--accent); color: #fff; padding: 2px 8px; border-radius: 4px; }
+    .meta-bar { display: flex; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); }
+    .meta-bar span { display: flex; align-items: center; gap: 4px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .dot.green { background: var(--green); }
+    .dot.amber { background: var(--amber); }
+    .dot.red { background: var(--red); }
+    .layout { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 57px); }
+    .sidebar { border-right: 1px solid var(--border); overflow-y: auto; background: var(--panel); }
+    .sidebar h2 { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 14px 16px 6px; }
+    .nav-item { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text); font-size: 13px; padding: 7px 16px; cursor: pointer; border-radius: 4px; margin: 2px 8px; transition: background 0.15s; }
+    .nav-item:hover { background: rgba(255,255,255,0.06); }
+    .nav-item.active { background: var(--accent); color: #fff; }
+    .nav-section { margin-top: 8px; }
+    .main-content { overflow: hidden; position: relative; }
+    .panel { display: none; height: 100%; flex-direction: column; }
+    .panel.active { display: flex; }
+    .panel-header { padding: 14px 20px 10px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    .panel-header h2 { font-size: 14px; font-weight: 600; }
+    .panel-header .badge { font-size: 11px; background: var(--border); color: var(--muted); padding: 2px 8px; border-radius: 4px; }
+    .panel-body { flex: 1; overflow-y: auto; padding: 16px 20px; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+    .stat-card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .stat-card .value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+    .stat-card .value.accent { color: var(--accent); }
+    .stat-card .value.accent2 { color: var(--accent2); }
+    .stat-card .value.green { color: var(--green); }
+    .section-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 16px 0 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    td { padding: 8px 10px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    tr:hover td { background: rgba(255,255,255,0.03); }
+    .tag-chip { display: inline-block; font-size: 11px; padding: 2px 7px; border-radius: 3px; font-weight: 500; }
+    .tag-chip.brand { background: rgba(99,102,241,0.15); color: var(--accent); border: 1px solid rgba(99,102,241,0.3); }
+    .tag-chip.faq { background: rgba(34,211,238,0.1); color: var(--accent2); border: 1px solid rgba(34,211,238,0.25); }
+    .tag-chip.policy { background: rgba(245,158,11,0.1); color: var(--amber); border: 1px solid rgba(245,158,11,0.25); }
+    .tag-chip.issue { background: rgba(16,185,129,0.1); color: var(--green); border: 1px solid rgba(16,185,129,0.25); }
+    .tag-chip.rel { background: rgba(59,130,246,0.1); color: var(--blue); border: 1px solid rgba(59,130,246,0.25); }
+    .tag-chip.pg { background: rgba(168,85,247,0.1); color: #a855f7; border: 1px solid rgba(168,85,247,0.25); }
+    .graph-container { flex: 1; position: relative; background: var(--bg); }
+    #graph-svg { width: 100%; height: 100%; display: block; }
+    .link { stroke-opacity: 0.4; }
+    .node circle { stroke-width: 2px; cursor: pointer; transition: stroke-width 0.2s; }
+    .node:hover circle { stroke-width: 4px; }
+    .node text { font-size: 10px; fill: var(--muted); pointer-events: none; }
+    .node.highlighted text { fill: var(--text); }
+    .tooltip { position: absolute; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; font-size: 12px; pointer-events: none; opacity: 0; transition: opacity 0.15s; max-width: 280px; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+    .tooltip.visible { opacity: 1; }
+    .tooltip .t-label { font-weight: 600; color: var(--accent); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+    .tooltip .t-val { color: var(--text); margin: 2px 0; }
+    .search-box { margin: 14px 20px 0; }
+    .search-box input { width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 7px 12px; font-size: 13px; outline: none; transition: border-color 0.15s; }
+    .search-box input:focus { border-color: var(--accent); }
+    .refresh-btn { font-size: 12px; background: none; border: 1px solid var(--border); color: var(--muted); padding: 5px 10px; border-radius: 5px; cursor: pointer; transition: all 0.15s; }
+    .refresh-btn:hover { border-color: var(--accent); color: var(--text); }
+    .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 200px; color: var(--muted); font-size: 13px; gap: 8px; }
+    .spinner { width: 24px; height: 24px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.6s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error-msg { color: var(--red); font-size: 12px; padding: 10px 16px; background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2); border-radius: 6px; margin: 10px 20px; }
+    .brand-card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 8px; }
+    .brand-card .brand-name { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+    .brand-card .brand-id { font-size: 11px; color: var(--muted); }
+    .brand-card .domains { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    .service-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    .service-row:last-child { border-bottom: none; }
+    .service-name { font-size: 13px; font-weight: 500; }
+    .service-url { font-size: 11px; color: var(--muted); }
+  </style>
+</head>
+<body>
+<header>
+  <h1>L1 Support AI — System Visualizer</h1>
+  <div class="meta-bar">
+    <span><span class="dot green" id="status-dot"></span> <span id="status-text">Loading...</span></span>
+    <span id="total-nodes"></span>
+    <span id="total-rels"></span>
+  </div>
+</header>
+
+<div class="layout">
+  <!-- SIDEBAR -->
+  <nav class="sidebar">
+    <h2>Graph</h2>
+    <button class="nav-item active" onclick="showPanel('overview')">System Overview</button>
+    <button class="nav-item" onclick="showPanel('ontology')">Ontology Schema</button>
+    <button class="nav-item" onclick="showPanel('nodes')">Node Explorer</button>
+    <button class="nav-item" onclick="showPanel('rels')">Relationships</button>
+    <button class="nav-item" onclick="showPanel('graph')">Force Graph</button>
+
+    <h2 class="nav-section">Knowledge Base</h2>
+    <button class="nav-item" onclick="showPanel('faqs')">FAQs</button>
+    <button class="nav-item" onclick="showPanel('policies')">Policies</button>
+    <button class="nav-item" onclick="showPanel('kb')">pgvector Chunks</button>
+
+    <h2 class="nav-section">System</h2>
+    <button class="nav-item" onclick="showPanel('brands')">Brand Registry</button>
+    <button class="nav-item" onclick="showPanel('sessions')">Active Sessions</button>
+    <button class="nav-item" onclick="showPanel('services')">Services</button>
+  </nav>
+
+  <!-- MAIN CONTENT -->
+  <div class="main-content">
+
+    <!-- PANEL: System Overview -->
+    <div class="panel active" id="panel-overview">
+      <div class="panel-header">
+        <h2>System Overview</h2>
+        <button class="refresh-btn" onclick="loadOverview()">↻ Refresh</button>
+      </div>
+      <div class="panel-body" id="overview-body">
+        <div class="empty-state"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+    <!-- PANEL: Ontology Schema -->
+    <div class="panel" id="panel-ontology">
+      <div class="panel-header">
+        <h2>Ontology Schema</h2>
+        <button class="refresh-btn" onclick="loadOntology()">↻ Refresh</button>
+      </div>
+      <div class="panel-body" id="ontology-body">
+        <div class="empty-state"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+    <!-- PANEL: Node Explorer -->
+    <div class="panel" id="panel-nodes">
+      <div class="panel-header">
+        <h2>Node Explorer</h2>
+        <span class="badge" id="nodes-count"></span>
+      </div>
+      <div class="search-box">
+        <input type="text" id="node-search" placeholder="Filter nodes..." oninput="filterNodes()">
+      </div>
+      <div class="panel-body" id="nodes-body">
+        <div class="empty-state"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+    <!-- PANEL: Relationships -->
+    <div class="panel" id="panel-rels">
+      <div class="panel-header">
+        <h2>Relationship Types</h2>
+      </div>
+      <div class="panel-body" id="rels-body">
+        <div class="empty-state"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+    <!-- PANEL: Force Graph -->
+    <div class="panel" id="panel-graph">
+      <div class="panel-header">
+        <h2>Knowledge Graph — Force-Directed</h2>
+        <span style="font-size:11px;color:var(--muted)">Click nodes to inspect · Scroll to zoom</span>
+      </div>
+      <div class="graph-container" id="graph-container">
+        <svg id="graph-svg"></svg>
+        <div class="tooltip" id="tooltip"></div>
+      </div>
+    </div>
+
+    <!-- PANEL: FAQs -->
+    <div class="panel" id="panel-faqs">
+      <div class="panel-header">
+        <h2>FAQs</h2>
+        <button class="refresh-btn" onclick="loadFaqs()">↻ Refresh</button>
+      </div>
+      <div class="panel-body" id="faqs-body">
+        <div class="empty-state"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+    <!-- PANEL: Policies -->
+    <div class="panel" id="panel-policies">
+      <div class="panel-header">
+        <h2>Policies</h2>
+      </div>
+      <div class="panel-body" id="policies-body">
+        <div class="empty-state"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+    <!-- PANEL: pgvector Chunks -->
+    <div class="panel" id="panel-kb">
+      <div class="panel-header">
+        <h2>pgvector Knowledge Chunks</h2>
+      </div>
+      <div class="panel-body" id="kb-body">
+        <div class="empty-state"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+    <!-- PANEL: Brand Registry -->
+    <div class="panel" id="panel-brands">
+      <div class="panel-header">
+        <h2>Brand Registry</h2>
+      </div>
+      <div class="panel-body" id="brands-body">
+        <div class="empty-state"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+    <!-- PANEL: Sessions -->
+    <div class="panel" id="panel-sessions">
+      <div class="panel-header">
+        <h2>Active Sessions</h2>
+        <button class="refresh-btn" onclick="loadSessions()">↻ Refresh</button>
+      </div>
+      <div class="panel-body" id="sessions-body">
+        <div class="empty-state"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+    <!-- PANEL: Services -->
+    <div class="panel" id="panel-services">
+      <div class="panel-header">
+        <h2>Service Health</h2>
+        <button class="refresh-btn" onclick="loadServices()">↻ Refresh</button>
+      </div>
+      <div class="panel-body" id="services-body">
+        <div class="empty-state"><div class="spinner"></div>Loading...</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script>
+const API = window.location.origin;
+let graphData = null;
+let overviewData = null;
+let allNodes = [];
+let allRels = [];
+
+// ── Panel navigation ──────────────────────────────────────────────────────
+function showPanel(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  const panel = document.getElementById('panel-' + id);
+  if (panel) panel.classList.add('active');
+  const btn = [...document.querySelectorAll('.nav-item')].find(b => b.textContent.includes(id === 'overview' ? 'System Overview' : id === 'nodes' ? 'Node Explorer' : id === 'rels' ? 'Relationships' : id === 'graph' ? 'Force Graph' : id.charAt(0).toUpperCase() + id.slice(1)));
+  if (btn) btn.classList.add('active');
+
+  const handlers = { overview: loadOverview, ontology: loadOntology, nodes: loadNodes, rels: loadRels, faqs: loadFaqs, policies: loadPolicies, kb: loadKb, brands: loadBrands, sessions: loadSessions, services: loadServices };
+  if (handlers[id]) handlers[id]();
+}
+
+// ── API helpers ───────────────────────────────────────────────────────────
+async function apiGET(path) {
+  const r = await fetch(API + path);
+  if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+  return r.json();
+}
+
+// ── Load all ─────────────────────────────────────────────────────────────
+async function init() {
+  try {
+    overviewData = await apiGET('/admin/overview');
+    graphData = await apiGET('/admin/graph/summary');
+    allNodes = graphData.nodes || [];
+    allRels = (await apiGET('/admin/graph/relationships')).relationships || [];
+    document.getElementById('status-text').textContent = 'All systems operational';
+    document.getElementById('status-dot').className = 'dot green';
+    document.getElementById('total-nodes').textContent = graphData.total_nodes + ' nodes';
+    document.getElementById('total-rels').textContent = allRels.reduce((s, r) => s + r.count, 0) + ' rels';
+    loadOverview();
+    renderGraph();
+  } catch (e) {
+    document.getElementById('status-text').textContent = 'Error: ' + e.message;
+    document.getElementById('status-dot').className = 'dot red';
+  }
+}
+
+// ── OVERVIEW ─────────────────────────────────────────────────────────────
+async function loadOverview() {
+  const body = document.getElementById('overview-body');
+  body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+  try {
+    const d = overviewData || await apiGET('/admin/overview');
+    const s = d.services || {};
+    const kc = Object.values(d.postgres_kb || {}).reduce((a, b) => a + b, 0);
+    const nodeTotal = (d.knowledge_graph || {}).nodes_by_label || [];
+    body.innerHTML = `
+      <div class="stat-grid">
+        <div class="stat-card"><div class="label">Total Nodes</div><div class="value accent">${nodeTotal.reduce((a,b)=>a+b.count,0)}</div></div>
+        <div class="stat-card"><div class="label">Relationships</div><div class="value accent2">${allRels.reduce((a,b)=>a+b.count,0)}</div></div>
+        <div class="stat-card"><div class="label">KB Chunks</div><div class="value green">${kc || 0}</div></div>
+        <div class="stat-card"><div class="label">Active Sessions</div><div class="value">${d.active_sessions || 0}</div></div>
+        <div class="stat-card"><div class="label">Brands</div><div class="value">${d.registered_brands || 0}</div></div>
+        <div class="stat-card"><div class="label">Node Types</div><div class="value">${nodeTotal.length}</div></div>
+      </div>
+      <div class="section-title">Node Distribution</div>
+      <table><thead><tr><th>Label</th><th>Count</th><th></th></tr></thead><tbody>
+        ${nodeTotal.map(n => `<tr><td><span class="tag-chip issue">${n.label}</span></td><td>${n.count}</td><td><div style="height:6px;background:var(--accent);border-radius:3px;width:${Math.max(10, Math.min(100, n.count / nodeTotal[0].count * 100))}%;opacity:${0.3 + n.count/nodeTotal[0].count*0.7}"></div></td></tr>`).join('')}
+      </tbody></table>
+    `;
+  } catch (e) {
+    body.innerHTML = `<div class="error-msg">Failed to load: ${e.message}</div>`;
+  }
+}
+
+// ── ONTOLOGY ──────────────────────────────────────────────────────────────
+async function loadOntology() {
+  const body = document.getElementById('ontology-body');
+  body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+  try {
+    const d = await apiGET('/admin/ontology');
+    body.innerHTML = `
+      <div class="stat-grid">
+        <div class="stat-card"><div class="label">Node Labels</div><div class="value accent">${d.node_labels.length}</div></div>
+        <div class="stat-card"><div class="label">Relationship Types</div><div class="value accent2">${d.relationship_types.length}</div></div>
+        <div class="stat-card"><div class="label">Property Keys</div><div class="value">${d.property_keys.length}</div></div>
+      </div>
+      <div class="section-title">Node Labels</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">
+        ${d.node_labels.map(l => `<span class="tag-chip issue">${l}</span>`).join('')}
+      </div>
+      <div class="section-title">Relationship Types</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">
+        ${d.relationship_types.map(r => `<span class="tag-chip rel">${r}</span>`).join('')}
+      </div>
+      <div class="section-title">Property Keys</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">
+        ${d.property_keys.map(p => `<span style="font-size:11px;background:var(--panel);border:1px solid var(--border);padding:2px 6px;border-radius:3px;color:var(--muted)">${p}</span>`).join('')}
+      </div>
+    `;
+  } catch (e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+// ── NODES ───────────────────────────────────────────────────────────────
+async function loadNodes() {
+  const body = document.getElementById('nodes-body');
+  body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+  try {
+    const d = graphData || await apiGET('/admin/graph/summary');
+    allNodes = d.nodes || [];
+    document.getElementById('nodes-count').textContent = d.total_nodes + ' total';
+    renderNodes(allNodes);
+  } catch (e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+function renderNodes(nodes) {
+  const body = document.getElementById('nodes-body');
+  const search = document.getElementById('node-search').value.toLowerCase();
+  const filtered = nodes.filter(n => n.label.toLowerCase().includes(search));
+  body.innerHTML = `
+    <table><thead><tr><th>Label</th><th>Count</th><th>Share</th></tr></thead><tbody>
+      ${filtered.map(n => {
+        const total = nodes.reduce((a,b)=>a+b.count,0);
+        const pct = total ? Math.round(n.count/total*100) : 0;
+        return `<tr><td><span class="tag-chip issue">${n.label}</span></td><td>${n.count}</td><td>${pct}%</td></tr>`;
+      }).join('')}
+    </tbody></table>
+  `;
+}
+
+function filterNodes() {
+  renderNodes(allNodes);
+}
+
+// ── RELATIONSHIPS ─────────────────────────────────────────────────────────
+async function loadRels() {
+  const body = document.getElementById('rels-body');
+  body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+  try {
+    const d = await apiGET('/admin/graph/relationships');
+    const rels = d.relationships || allRels;
+    const total = rels.reduce((a,b)=>a+b.count,0);
+    body.innerHTML = `
+      <div class="stat-grid" style="margin-bottom:16px">
+        <div class="stat-card"><div class="label">Relationship Types</div><div class="value accent2">${rels.length}</div></div>
+        <div class="stat-card"><div class="label">Total Edges</div><div class="value">${total}</div></div>
+      </div>
+      <table><thead><tr><th>Type</th><th>Count</th><th>Share</th></tr></thead><tbody>
+        ${rels.map(r => `<tr><td><span class="tag-chip rel">${r.type}</span></td><td>${r.count}</td><td>${total ? Math.round(r.count/total*100) : 0}%</td></tr>`).join('')}
+      </tbody></table>
+    `;
+  } catch (e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+// ── FAQs ─────────────────────────────────────────────────────────────────
+async function loadFaqs() {
+  const body = document.getElementById('faqs-body');
+  body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+  try {
+    const d = await apiGET('/admin/kb/faqs');
+    body.innerHTML = `
+      <div class="stat-grid" style="margin-bottom:14px">
+        <div class="stat-card"><div class="label">Total FAQs</div><div class="value accent">${d.count}</div></div>
+      </div>
+      ${d.faqs.map(f => `
+        <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:8px">
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <span class="tag-chip faq">${f.category || 'General'}</span>
+          </div>
+          <div style="font-size:13px;font-weight:600;margin-bottom:4px;color:var(--text)">${esc(f.question)}</div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.5">${esc(f.answer)}</div>
+          ${f.keywords ? `<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:3px">${(f.keywords||'').split(',').map(k=>`<span style="font-size:10px;background:var(--bg);border:1px solid var(--border);padding:1px 5px;border-radius:2px;color:var(--muted)">${k.trim()}</span>`).join('')}</div>` : ''}
+        </div>
+      `).join('')}
+    `;
+  } catch (e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+// ── POLICIES ─────────────────────────────────────────────────────────────
+async function loadPolicies() {
+  const body = document.getElementById('policies-body');
+  body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+  try {
+    const d = await apiGET('/admin/kb/policies');
+    body.innerHTML = `
+      <div class="stat-grid" style="margin-bottom:14px">
+        <div class="stat-card"><div class="label">Total Policies</div><div class="value amber">${d.policies.length}</div></div>
+      </div>
+      <table><thead><tr><th>Type</th><th>Brand</th><th>Title</th></tr></thead><tbody>
+        ${d.policies.map(p => `<tr><td><span class="tag-chip policy">${p.type}</span></td><td><span class="tag-chip brand">${p.brand_id}</span></td><td>${p.title}</td></tr>`).join('')}
+      </tbody></table>
+    `;
+  } catch (e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+// ── pgvector KB ─────────────────────────────────────────────────────────
+async function loadKb() {
+  const body = document.getElementById('kb-body');
+  body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+  try {
+    const d = await apiGET('/admin/kb/pgvector/chunks');
+    body.innerHTML = `
+      <div class="stat-grid" style="margin-bottom:14px">
+        <div class="stat-card"><div class="label">Total Chunks</div><div class="value" style="color:#a855f7">${d.count}</div></div>
+      </div>
+      ${d.chunks.map(c => `
+        <div style="background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px">
+          <div style="display:flex;gap:6px;margin-bottom:6px">
+            <span class="tag-chip brand">${c.brand_id}</span>
+            <span class="tag-chip pg">${c.chunk_type || 'chunk'}</span>
+          </div>
+          <div style="font-size:12px;color:var(--muted)">${esc(c.preview || '')}...</div>
+        </div>
+      `).join('')}
+    `;
+  } catch (e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+// ── BRANDS ───────────────────────────────────────────────────────────────
+async function loadBrands() {
+  const body = document.getElementById('brands-body');
+  body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+  try {
+    const d = await apiGET('/admin/brands');
+    body.innerHTML = d.brands.map(b => `
+      <div class="brand-card">
+        <div class="brand-name">${b.name}</div>
+        <div class="brand-id">${b.brand_id}</div>
+        <div class="domains">${b.domains.map(d => `<span class="tag-chip brand">${d}</span>`).join('')}</div>
+      </div>
+    `).join('');
+  } catch (e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+// ── SESSIONS ─────────────────────────────────────────────────────────────
+async function loadSessions() {
+  const body = document.getElementById('sessions-body');
+  body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+  try {
+    const d = await apiGET('/admin/sessions');
+    body.innerHTML = `
+      <div class="stat-grid" style="margin-bottom:14px">
+        <div class="stat-card"><div class="label">Active Sessions</div><div class="value">${d.count}</div></div>
+      </div>
+      ${d.sessions.length === 0 ? '<div class="empty-state">No active sessions</div>' : `
+        <table><thead><tr><th>Session ID</th><th>Brand</th><th>Channel</th><th>Turns</th><th>Outcome</th></tr></thead><tbody>
+          ${d.sessions.map(s => `<tr><td><code style="font-size:11px">${s.session_id.slice(0,8)}...</code></td><td><span class="tag-chip brand">${s.brand_id}</span></td><td>${s.channel}</td><td>${s.turn_count}</td><td>${s.outcome || 'open'}</td></tr>`).join('')}
+        </tbody></table>
+      `}
+    `;
+  } catch (e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+// ── SERVICES ──────────────────────────────────────────────────────────────
+async function loadServices() {
+  const body = document.getElementById('services-body');
+  body.innerHTML = '<div class="empty-state"><div class="spinner"></div></div>';
+  try {
+    const d = overviewData || await apiGET('/admin/overview');
+    const svcs = d.services || {};
+    body.innerHTML = Object.entries(svcs).map(([name, info]) => {
+      const dot = info.status === 'up' ? 'green' : 'amber';
+      const url = info.url || (info.host ? `${info.host}:${info.port}` : '');
+      return `<div class="service-row">
+        <div><div class="service-name">${name}</div><div class="service-url">${url}</div></div>
+        <div style="display:flex;align-items:center;gap:8px"><span class="dot ${dot}"></span><span style="font-size:12px;color:var(--muted)">${info.status || 'unknown'}</span></div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    body.innerHTML = `<div class="error-msg">${e.message}</div>`;
+  }
+}
+
+// ── FORCE GRAPH ───────────────────────────────────────────────────────────
+function renderGraph() {
+  const container = document.getElementById('graph-container');
+  const svg = d3.select('#graph-svg');
+  svg.selectAll('*').remove();
+
+  const W = container.clientWidth || 800;
+  const H = container.clientHeight || 600;
+
+  svg.attr('viewBox', [0, 0, W, H]);
+
+  const g = svg.append('g');
+
+  // Zoom
+  svg.call(d3.zoom().scaleExtent([0.1, 4]).on('zoom', e => g.attr('transform', e.transform)));
+
+  const tooltip = document.getElementById('tooltip');
+
+  // Build nodes from summary
+  const nodeTypes = allNodes.map(n => ({ id: n.label, label: n.label, count: n.count, type: 'node' }));
+  const relTypes = allRels.map(r => ({ id: r.type, label: r.type, count: r.count, type: 'rel' }));
+  const nodes = [...nodeTypes, ...relTypes];
+
+  const linkData = allRels.flatMap(r => {
+    const src = allNodes.find(n => n.label.includes('Policy') ? r.type.includes('POLICY') :
+      r.type === 'HAS_FAQ' ? 'FAQ' :
+      r.type === 'RESOLVED_BY' ? 'Resolution' : n.label);
+    const srcNode = nodeTypes.find(n => n.label !== 'Brand');
+    if (!srcNode) return [];
+    return [{ source: srcNode.id, target: r.type, type: r.type, count: r.count }];
+  });
+
+  const maxCount = Math.max(...allNodes.map(n => n.count), 1);
+  const colorScale = d3.scaleOrdinal()
+    .domain(['Brand', 'FAQ', 'ReturnPolicy', 'ShippingPolicy', 'IssueType', 'Resolution', 'PolicyDetail'])
+    .range(['#6366f1', '#22d3ee', '#f59e0b', '#f59e0b', '#10b981', '#3b82f6', '#a855f7']);
+
+  const sim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(linkData).id(d => d.id).distance(80))
+    .force('charge', d3.forceManyBody().strength(-200))
+    .force('center', d3.forceCenter(W / 2, H / 2))
+    .force('collide', d3.forceCollide(d => Math.sqrt(d.count || 1) * 2 + 20));
+
+  const link = g.append('g').selectAll('line')
+    .data(linkData).join('line')
+    .attr('class', 'link')
+    .attr('stroke', '#374151')
+    .attr('stroke-width', d => Math.min(4, Math.log(d.count + 1)));
+
+  const node = g.append('g').selectAll('g')
+    .data(nodes).join('g')
+    .attr('class', 'node')
+    .call(d3.drag().on('start', (e, d) => { if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  node.append('circle')
+    .attr('r', d => 6 + Math.sqrt(d.count || 1) / maxCount * 28)
+    .attr('fill', d => d.type === 'rel' ? '#374151' : colorScale(d.label))
+    .attr('stroke', d => d.type === 'rel' ? '#4b5563' : '#9ca3af')
+    .on('mouseover', (e, d) => {
+      tooltip.innerHTML = `<div class="t-label">${d.label}</div><div class="t-val">${d.count} node${d.count !== 1 ? 's' : ''}</div>`;
+      tooltip.classList.add('visible');
+    })
+    .on('mousemove', (e) => {
+      tooltip.style.left = (e.offsetX + 14) + 'px';
+      tooltip.style.top = (e.offsetY - 10) + 'px';
+    })
+    .on('mouseout', () => tooltip.classList.remove('visible'));
+
+  node.append('text')
+    .attr('text-anchor', 'middle')
+    .attr('dy', d => 10 + Math.sqrt(d.count || 1) / maxCount * 28)
+    .text(d => d.label.length > 15 ? d.label.slice(0, 14) + '…' : d.label);
+
+  sim.on('tick', () => {
+    link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    node.attr('transform', d => `translate(${d.x},${d.y})`);
+  });
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────
+function esc(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+init();
+</script>
+</body>
+</html>

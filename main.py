@@ -721,7 +721,7 @@ async def add_brand(req: BrandRegisterRequest):
         "registered": True,
         "brand_id": req.brand_id,
         "name": req.name,
-        "next_step": f"Call POST /admin/ingest with brand={req.brand_id} to seed the knowledge graph.",
+        "next_step": f"Call POST /admin/brands/{req.brand_id}/collect to crawl the web and populate the knowledge graph.",
     }
 
 
