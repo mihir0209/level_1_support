@@ -51,20 +51,26 @@ for sp in sys.path:
             ))
             print(f"patched litellm_logging: {p2}")
 
-    # Patch 3: VertexAI image generation ImportError (VertexAIModelRoute missing)
-    p3 = base / "llms/vertex_ai/image_generation/__init__.py"
-    if p3.exists():
-        txt3 = p3.read_text()
-        if "VertexAIModelRoute" in txt3 and "from litellm.llms.vertex_ai.common_utils" in txt3:
-            # Wrap the problematic import in a try/except
-            p3.write_text(txt3.replace(
-                "from litellm.llms.vertex_ai.common_utils import (",
-                "try:\n    from litellm.llms.vertex_ai.common_utils import (",
-            ).replace(
-                "    VertexAIModelRoute,\n)",
-                "    VertexAIModelRoute,\n)\nexcept ImportError:\n    VertexAIModelRoute = None",
-            ))
-            print(f"patched vertex_ai image_generation __init__: {p3}")
+    # Patch 3: VertexAI ImportError — VertexAIModelRoute missing from common_utils.
+    # We don't use VertexAI; remove the broken import block from litellm/main.py.
+    p_main = base / "main.py"
+    if p_main.exists():
+        txt_main = p_main.read_text()
+        marker = "from .llms.vertex_ai.image_generation.image_generation_handler import"
+        if marker in txt_main:
+            out, skip = [], False
+            for line in txt_main.splitlines():
+                if marker in line:
+                    skip = True
+                    out.append("# vertex_ai image_generation import removed (VertexAIModelRoute missing)")
+                    continue
+                if skip:
+                    if line.strip() == ")":
+                        skip = False
+                    continue
+                out.append(line)
+            p_main.write_text("\n".join(out))
+            print(f"patched litellm main.py: removed vertex_ai image_generation import")
     break
 EOF
 
