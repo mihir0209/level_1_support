@@ -699,6 +699,27 @@ def upsert_issue_type(graph, issue: IssueType) -> None:
         )
 
 
+def seed_customers(graph) -> None:
+    """Seed demo customers with CLIENT_OF relationship to their brand."""
+    from core.tools.registry import _MOCK_CUSTOMERS
+    for c in _MOCK_CUSTOMERS.values():
+        cid = c["customer_id"]
+        brand_id = c["brand_id"]
+        name = c["name"].replace("'", "")
+        email = c["email"]
+        tier = c["tier"]
+        locale = c["locale"]
+        total_orders = c["total_orders"]
+        graph.query(
+            f"MERGE (c:Customer {{customer_id: '{cid}'}}) "
+            f"SET c.brand_id = '{brand_id}', c.name = '{name}', "
+            f"    c.email = '{email}', c.tier = '{tier}', "
+            f"    c.locale = '{locale}', c.total_orders = {total_orders} "
+            f"WITH c MATCH (b:Brand {{brand_id: '{brand_id}'}}) "
+            f"MERGE (c)-[:CLIENT_OF]->(b)"
+        )
+
+
 def seed_all(graph) -> None:
     """Run full seed. Idempotent — safe to re-run."""
     log.info("seeding_brands", count=len(BRANDS))
@@ -716,6 +737,12 @@ def seed_all(graph) -> None:
     log.info("seeding_issue_types", count=len(ISSUE_TYPES))
     for issue in ISSUE_TYPES:
         upsert_issue_type(graph, issue)
+
+    log.info("seeding_demo_customers")
+    try:
+        seed_customers(graph)
+    except Exception as e:
+        log.warning("customer_seed_failed", error=str(e))
 
     log.info("seed_complete")
 

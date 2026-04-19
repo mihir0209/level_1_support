@@ -1,21 +1,25 @@
 """
-Brand data collection orchestrator.
+Brand data collection orchestrator — fully open-source, no paid APIs required.
 
-Flow for a newly registered brand:
-  1. Seed — crawl the brand's own website (support pages, policies, FAQs)
-  2. Discover — web-search for news, reviews, social mentions about the brand
-  3. Fetch — crawl each discovered URL for structured content
-  4. Extract — pull typed facts (policy, FAQ, review, news, social) using LLM
-  5. Deduplicate — skip any URL/content already seen (Redis hash set)
-  6. Store — write to FalkorDB graph + Postgres pgvector
-  7. Checkpoint — persist crawl state to Redis so runs can resume
+Tools used:
+  • crawl4ai   — async web crawler (JS-capable, handles any URL including search pages)
+  • ScrapeGraphAI — multi-URL structured LLM extraction
+  • DuckDuckGo HTML search (https://html.duckduckgo.com/html/) — free, no API key
+
+Collection flow per brand:
+  1. SEED      — queue the brand's own support pages + sitemap
+  2. DISCOVER  — crawl DuckDuckGo HTML for news / reviews / social via dork queries
+  3. FETCH     — crawl4ai deep-crawls brand domain (BFS, max_depth=3)
+                 ScrapeGraphAI extracts structured data from all discovered URLs
+  4. STORE     — write typed data to FalkorDB graph + Postgres pgvector
+  5. CHECKPOINT — persist state to Redis after every batch; resume on next call
 
 Deduplication:
-  Redis SET  brand:collect:{brand_id}:visited_urls  → SHA256(canonicalized URL)
+  Redis SET  brand:collect:{brand_id}:visited_urls   → SHA256(canonical URL)
   Redis HASH brand:collect:{brand_id}:content_hashes → SHA256(content) → URL
 
-Checkpoint state (Redis JSON):
-  brand:collect:{brand_id}:state → {queue, visited_count, phase, started_at, updated_at}
+Schema covers: policy · faq · review · social · news · other
+Reviews and social → BrandMention nodes with sentiment + complaints + praises
 """
 
 from __future__ import annotations
@@ -27,14 +31,15 @@ import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, AsyncIterator
-from urllib.parse import urlparse, urlunparse
+from typing import Any
+from urllib.parse import urlparse, urlunparse, quote_plus
 
 import structlog
 
 from config import settings
 
 log = structlog.get_logger(__name__)
+
 
 # ── Redis key helpers ─────────────────────────────────────────────────────────
 def _rkey(brand_id: str, suffix: str) -> str:
@@ -43,10 +48,8 @@ def _rkey(brand_id: str, suffix: str) -> str:
 
 # ── URL canonicalization + hashing ────────────────────────────────────────────
 def canonical_url(url: str) -> str:
-    """Strip tracking params, normalize scheme/host, drop fragments."""
     try:
         p = urlparse(url.strip())
-        # Rebuild without query params that are tracking-only
         path = p.path.rstrip("/") or "/"
         return urlunparse((p.scheme.lower(), p.netloc.lower(), path, "", "", ""))
     except Exception:
@@ -94,38 +97,21 @@ class CollectState:
         return cls(**d)
 
 
-# ── Extraction schemas (Pydantic-compatible dicts for crawl4ai / ScrapeGraph) ──
+# ── Extraction schema for crawl4ai LLM strategy + ScrapeGraphAI ──────────────
 BRAND_PAGE_SCHEMA = {
     "type": "object",
     "properties": {
         "page_type": {
             "type": "string",
             "enum": ["policy", "faq", "about", "product", "news", "review", "social", "other"],
-            "description": "What kind of page this is",
         },
         "brand_name": {"type": "string"},
         "title": {"type": "string"},
-        "summary": {"type": "string", "description": "2-3 sentence summary of the page content"},
-        "key_facts": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "Important facts, policies, or claims on this page",
-        },
+        "summary": {"type": "string"},
+        "key_facts": {"type": "array", "items": {"type": "string"}},
         "sentiment": {
             "type": "string",
             "enum": ["positive", "neutral", "negative", "mixed"],
-            "description": "Overall tone/sentiment of the content",
-        },
-        "entities": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "type": {"type": "string"},
-                },
-            },
-            "description": "Named entities: products, people, places, policies",
         },
         "faq_pairs": {
             "type": "array",
@@ -159,17 +145,16 @@ BRAND_PAGE_SCHEMA = {
     "required": ["page_type", "summary", "key_facts"],
 }
 
-# ── Search query templates ────────────────────────────────────────────────────
-def _build_search_queries(brand_name: str, domain: str) -> list[str]:
-    """Generate multi-source discovery queries for a brand."""
+# ── DuckDuckGo dork queries for multi-source discovery ────────────────────────
+def _dork_queries(brand_name: str, domain: str) -> list[str]:
     return [
-        f'"{brand_name}" customer reviews complaints',
-        f'"{brand_name}" return policy shipping delivery 2024 2025',
+        f'"{brand_name}" customer reviews',
+        f'"{brand_name}" return policy shipping',
         f'site:trustpilot.com "{brand_name}"',
         f'site:reddit.com "{brand_name}" customer service',
         f'"{brand_name}" news 2024 2025',
-        f'"{brand_name}" social media controversy OR complaint OR praise',
-        f'"{brand_name}" review site:reviews.io OR site:resellerratings.com',
+        f'site:reviews.io "{brand_name}"',
+        f'"{brand_name}" complaint OR refund OR delivery problem',
     ]
 
 
@@ -178,28 +163,22 @@ def _build_search_queries(brand_name: str, domain: str) -> list[str]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class DedupTracker:
-    """Redis-backed deduplication for URLs and content."""
-
     def __init__(self, brand_id: str, redis_client):
         self._r = redis_client
         self._url_key = _rkey(brand_id, "visited_urls")
         self._content_key = _rkey(brand_id, "content_hashes")
 
     async def is_url_seen(self, url: str) -> bool:
-        h = url_hash(url)
-        return bool(await self._r.sismember(self._url_key, h))
+        return bool(await self._r.sismember(self._url_key, url_hash(url)))
 
     async def mark_url_seen(self, url: str) -> None:
-        h = url_hash(url)
-        await self._r.sadd(self._url_key, h)
+        await self._r.sadd(self._url_key, url_hash(url))
 
     async def is_content_duplicate(self, text: str) -> bool:
-        h = content_hash(text)
-        return bool(await self._r.hexists(self._content_key, h))
+        return bool(await self._r.hexists(self._content_key, content_hash(text)))
 
     async def mark_content_seen(self, text: str, url: str) -> None:
-        h = content_hash(text)
-        await self._r.hset(self._content_key, h, url)
+        await self._r.hset(self._content_key, content_hash(text), url)
 
     async def visited_count(self) -> int:
         return await self._r.scard(self._url_key)
@@ -210,8 +189,6 @@ class DedupTracker:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class CheckpointManager:
-    """Persist and restore crawl state in Redis."""
-
     def __init__(self, brand_id: str, redis_client):
         self._r = redis_client
         self._key = _rkey(brand_id, "state")
@@ -230,88 +207,205 @@ class CheckpointManager:
             log.warning("checkpoint_load_failed", brand_id=brand_id, error=str(e))
             return None
 
-    async def clear(self, brand_id: str) -> None:
-        await self._r.delete(self._key)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DISCOVERY — crawl4ai scrapes DuckDuckGo HTML (free, no API key)
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _discover_via_duckduckgo(queries: list[str], max_per_query: int = 6) -> list[str]:
+    """
+    Crawl DuckDuckGo HTML search pages with crawl4ai to extract result URLs.
+    Uses https://html.duckduckgo.com/html/ — no JS, no API key required.
+    """
+    discovered: list[str] = []
+    try:
+        from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+
+        async with AsyncWebCrawler() as crawler:
+            for query in queries:
+                ddg_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+                result = await crawler.arun(
+                    url=ddg_url,
+                    config=CrawlerRunConfig(
+                        cache_mode=CacheMode.BYPASS,
+                        word_count_threshold=0,
+                        css_selector="a.result__a",
+                    ),
+                )
+                if not result.success:
+                    continue
+                # Extract external links from the result page
+                external_links = result.links.get("external", []) if result.links else []
+                for link in external_links[:max_per_query]:
+                    href = link.get("href") if isinstance(link, dict) else str(link)
+                    if href and href.startswith("http"):
+                        discovered.append(href)
+
+    except ImportError:
+        log.warning("crawl4ai_not_installed", hint="pip install crawl4ai")
+    except Exception as e:
+        log.warning("duckduckgo_discovery_failed", error=str(e))
+
+    return list(dict.fromkeys(discovered))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WEB SEARCH (Exa API — no scraping restrictions)
+# DEEP CRAWL — crawl4ai BFS from brand's own domain
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _search_urls(queries: list[str], max_per_query: int = 5) -> list[str]:
+async def _deep_crawl_domain(base_domain: str, max_pages: int = 40) -> list[str]:
     """
-    Discover URLs via Exa (neural web search — no Google TOS restrictions).
-    Falls back to a simple HTTP search if Exa key not configured.
+    BFS deep-crawl the brand's own domain with crawl4ai.
+    Discovers all internal support/FAQ/policy/help pages automatically.
     """
-    urls: list[str] = []
+    collected_urls: list[str] = []
+    try:
+        from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
+        from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
 
-    exa_key = getattr(settings, "exa_api_key", "") or ""
-    if exa_key:
-        try:
-            from exa_py import Exa
-            exa = Exa(api_key=exa_key)
-            for q in queries:
-                result = exa.search(q, num_results=max_per_query, use_autoprompt=True)
-                for r in result.results:
-                    if r.url:
-                        urls.append(r.url)
-        except Exception as e:
-            log.warning("exa_search_failed", error=str(e))
+        strategy = BFSDeepCrawlStrategy(
+            max_depth=3,
+            max_pages=max_pages,
+            include_patterns=[
+                r".*(help|faq|support|returns?|refund|delivery|shipping|policy|contact|about).*"
+            ],
+            exclude_patterns=[
+                r".*(checkout|cart|login|register|cdn|\.jpg|\.png|\.css|\.js).*"
+            ],
+        )
+
+        async with AsyncWebCrawler() as crawler:
+            results = await crawler.arun(
+                url=f"https://{base_domain}/",
+                config=CrawlerRunConfig(
+                    cache_mode=CacheMode.BYPASS,
+                    deep_crawl_strategy=strategy,
+                    word_count_threshold=30,
+                ),
+            )
+            if isinstance(results, list):
+                for r in results:
+                    if r.success and r.url:
+                        collected_urls.append(r.url)
+            elif results and results.url:
+                collected_urls.append(results.url)
+
+    except ImportError:
+        log.warning("crawl4ai_not_installed")
+        # Fallback: return known seed URLs
+        collected_urls = [
+            f"https://{base_domain}/help",
+            f"https://{base_domain}/faq",
+            f"https://{base_domain}/returns",
+            f"https://{base_domain}/delivery",
+        ]
+    except Exception as e:
+        log.warning("deep_crawl_failed", domain=base_domain, error=str(e))
+
+    return list(dict.fromkeys(collected_urls))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# EXTRACTION — crawl4ai LLM strategy (single URL) + ScrapeGraphAI (batch)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _llm_config_for_provider() -> dict:
+    """Build provider/model/token config for both crawl4ai and ScrapeGraphAI."""
+    if settings.llm_provider == "anthropic" and settings.anthropic_api_key:
+        return {
+            "provider": f"anthropic/{settings.primary_model}",
+            "api_token": settings.anthropic_api_key,
+            "model": settings.primary_model,
+        }
+    elif settings.llm_provider == "azure" and settings.azure_openai_api_key:
+        return {
+            "provider": f"azure/{settings.azure_primary_deployment}",
+            "api_token": settings.azure_openai_api_key,
+            "model": settings.azure_primary_deployment,
+        }
     else:
-        # Fallback: use Bing/DuckDuckGo via httpx if Exa not configured
-        log.info("exa_key_not_set", hint="Set EXA_API_KEY for better search coverage")
-        try:
-            import httpx
-            async with httpx.AsyncClient(timeout=10) as client:
-                for q in queries[:3]:  # limit fallback queries
-                    resp = await client.get(
-                        "https://api.duckduckgo.com/",
-                        params={"q": q, "format": "json", "no_html": "1"},
-                        headers={"User-Agent": "L1SupportBot/1.0"},
-                    )
-                    data = resp.json()
-                    for item in data.get("RelatedTopics", [])[:max_per_query]:
-                        if isinstance(item, dict) and item.get("FirstURL"):
-                            urls.append(item["FirstURL"])
-        except Exception as e:
-            log.warning("duckduckgo_fallback_failed", error=str(e))
-
-    return list(dict.fromkeys(urls))  # dedupe preserving order
+        return {
+            "provider": f"openai/{settings.openai_primary_model}",
+            "api_token": settings.openai_api_key,
+            "model": settings.openai_primary_model,
+        }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CRAWL + EXTRACT (crawl4ai)
-# ══════════════════════════════════════════════════════════════════════════════
-
-async def _crawl_and_extract(url: str, brand_id: str, brand_name: str) -> dict | None:
+async def _extract_batch_scrapegraph(
+    urls: list[str], brand_name: str
+) -> list[tuple[str, dict]]:
     """
-    Crawl a URL with crawl4ai and extract structured data using an LLM.
-    Returns the extracted dict or None on failure.
+    Use ScrapeGraphAI SmartScraperMultiGraph to extract structured data from
+    multiple URLs in one LLM pass. Returns list of (url, extracted_dict).
+    """
+    if not urls:
+        return []
+    try:
+        from scrapegraphai.graphs import SmartScraperMultiGraph
+
+        cfg = _llm_config_for_provider()
+        sg_config = {
+            "llm": {
+                "model": cfg["model"],
+                "api_key": cfg["api_token"],
+            },
+            "headless": True,
+            "verbose": False,
+        }
+        prompt = (
+            f"For each page, extract structured information about {brand_name}: "
+            "classify the page type (policy/faq/review/social/news/other), "
+            "extract a summary, key facts, FAQ Q&A pairs if present, "
+            "policy details (type, return window days, conditions), "
+            "and review data (rating, platform, complaints, praises). "
+            "Also determine the overall sentiment."
+        )
+
+        graph = SmartScraperMultiGraph(
+            prompt=prompt,
+            source=urls,
+            config=sg_config,
+        )
+        result = graph.run()
+
+        # SmartScraperMultiGraph returns a dict keyed by URL or a list
+        if isinstance(result, dict):
+            return [(url, result.get(url, {})) for url in urls if url in result]
+        elif isinstance(result, list):
+            return list(zip(urls, result))
+        return []
+
+    except ImportError:
+        log.warning("scrapegraphai_not_installed", hint="pip install scrapegraphai")
+        return []
+    except Exception as e:
+        log.warning("scrapegraph_batch_failed", error=str(e))
+        return []
+
+
+async def _extract_single_crawl4ai(url: str, brand_name: str) -> dict | None:
+    """
+    Fallback: crawl4ai LLM extraction strategy for a single URL.
+    Used when ScrapeGraphAI is unavailable or for retries.
     """
     try:
         from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, CacheMode
         from crawl4ai.extraction_strategy import LLMExtractionStrategy, LLMConfig
 
-        llm_provider = settings.llm_provider
-        if llm_provider == "anthropic":
-            provider_str = f"anthropic/{settings.primary_model}"
-            api_token = settings.anthropic_api_key
-        elif llm_provider == "azure":
-            provider_str = f"azure/{settings.azure_primary_deployment}"
-            api_token = settings.azure_openai_api_key
-        else:
-            provider_str = f"openai/{settings.openai_primary_model}"
-            api_token = settings.openai_api_key
-
+        cfg = _llm_config_for_provider()
         strategy = LLMExtractionStrategy(
-            llm_config=LLMConfig(provider=provider_str, api_token=api_token),
+            llm_config=LLMConfig(
+                provider=cfg["provider"],
+                api_token=cfg["api_token"],
+            ),
             schema=BRAND_PAGE_SCHEMA,
             instruction=(
-                f"Extract structured information about {brand_name} from this page. "
-                "Focus on customer support relevant content: policies, FAQs, reviews, news."
+                f"Extract structured support-relevant information about {brand_name}. "
+                "Focus on: customer policies (returns, shipping, refunds), FAQs, "
+                "reviews/complaints/praises, and news. "
+                "Return exactly the JSON schema provided."
             ),
         )
-
         async with AsyncWebCrawler() as crawler:
             result = await crawler.arun(
                 url=url,
@@ -319,7 +413,6 @@ async def _crawl_and_extract(url: str, brand_id: str, brand_name: str) -> dict |
                     extraction_strategy=strategy,
                     cache_mode=CacheMode.BYPASS,
                     word_count_threshold=50,
-                    exclude_external_links=False,
                     wait_for="body",
                 ),
             )
@@ -329,49 +422,27 @@ async def _crawl_and_extract(url: str, brand_id: str, brand_name: str) -> dict |
 
         extracted = result.extracted_content
         if isinstance(extracted, str):
-            import json as _json
             try:
-                extracted = _json.loads(extracted)
+                extracted = json.loads(extracted)
             except Exception:
-                extracted = {"page_type": "other", "summary": extracted[:500], "key_facts": []}
-
+                return {"page_type": "other", "summary": extracted[:400], "key_facts": []}
         if isinstance(extracted, list):
             extracted = extracted[0] if extracted else None
-
         return extracted
 
     except ImportError:
-        log.warning("crawl4ai_not_installed", url=url)
-        return await _simple_fetch_extract(url, brand_name)
-    except Exception as e:
-        log.warning("crawl4ai_failed", url=url, error=str(e))
+        log.warning("crawl4ai_not_installed")
         return None
-
-
-async def _simple_fetch_extract(url: str, brand_name: str) -> dict | None:
-    """Fallback: plain httpx fetch + basic text extraction (no LLM)."""
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": "L1SupportBot/1.0"})
-            text = resp.text[:4000]
-        return {
-            "page_type": "other",
-            "summary": f"Raw content from {url} ({len(text)} chars)",
-            "key_facts": [],
-            "raw_text": text,
-        }
     except Exception as e:
-        log.warning("simple_fetch_failed", url=url, error=str(e))
+        log.warning("crawl4ai_single_failed", url=url, error=str(e))
         return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GRAPH + VECTOR WRITER
+# STORAGE — FalkorDB graph + Postgres pgvector
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def _write_to_graph(brand_id: str, url: str, extracted: dict) -> None:
-    """Write extracted data into FalkorDB based on page type."""
     try:
         from core.ontology.schema import get_graph_client
         _, graph = get_graph_client()
@@ -381,7 +452,7 @@ async def _write_to_graph(brand_id: str, url: str, extracted: dict) -> None:
         source_hash = url_hash(url)
 
         if page_type == "faq":
-            for pair in extracted.get("faq_pairs", []):
+            for pair in extracted.get("faq_pairs") or []:
                 q = (pair.get("question") or "")[:400].replace("'", "")
                 a = (pair.get("answer") or "")[:800].replace("'", "")
                 if not q:
@@ -389,22 +460,22 @@ async def _write_to_graph(brand_id: str, url: str, extracted: dict) -> None:
                 faq_id = f"{brand_id}_{hashlib.sha256(q.encode()).hexdigest()[:12]}"
                 graph.query(
                     f"MERGE (f:FAQ {{faq_id: '{faq_id}'}}) "
-                    f"SET f.brand_id = '{brand_id}', f.question = '{q}', f.answer = '{a}', "
-                    f"    f.source_url = '{url}', f.category = 'collected' "
+                    f"SET f.brand_id = '{brand_id}', f.question = '{q}', "
+                    f"    f.answer = '{a}', f.source_url = '{url}', f.category = 'collected' "
                     f"WITH f MATCH (b:Brand {{brand_id: '{brand_id}'}}) "
                     f"MERGE (b)-[:HAS_FAQ]->(f)"
                 )
 
         elif page_type == "policy":
             pd = extracted.get("policy_details") or {}
-            policy_type = (pd.get("policy_type") or "general").replace("'", "")
+            ptype = (pd.get("policy_type") or "general").replace("'", "")
             window = pd.get("window_days") or 0
             conditions = json.dumps(pd.get("conditions") or []).replace("'", "")
-            policy_id = f"{brand_id}_{policy_type}_{source_hash[:8]}"
+            policy_id = f"{brand_id}_{ptype}_{source_hash[:8]}"
             graph.query(
                 f"MERGE (p:Policy {{policy_id: '{policy_id}'}}) "
-                f"SET p.brand_id = '{brand_id}', p.policy_type = '{policy_type}', "
-                f"    p.title = '{policy_type.replace('_', ' ').title()}', "
+                f"SET p.brand_id = '{brand_id}', p.policy_type = '{ptype}', "
+                f"    p.title = '{ptype.replace('_', ' ').title()}', "
                 f"    p.summary = '{summary}', p.return_window_days = {window}, "
                 f"    p.conditions = '{conditions}', p.source_url = '{url}' "
                 f"WITH p MATCH (b:Brand {{brand_id: '{brand_id}'}}) "
@@ -416,47 +487,43 @@ async def _write_to_graph(brand_id: str, url: str, extracted: dict) -> None:
             rd = extracted.get("review_data") or {}
             rating = rd.get("rating") or 0.0
             platform = (rd.get("platform") or urlparse(url).netloc).replace("'", "")
-            complaints_json = json.dumps(rd.get("common_complaints") or []).replace("'", "")
-            praises_json = json.dumps(rd.get("common_praises") or []).replace("'", "")
+            complaints = json.dumps(rd.get("common_complaints") or []).replace("'", "")
+            praises = json.dumps(rd.get("common_praises") or []).replace("'", "")
             mention_id = f"{brand_id}_{page_type}_{source_hash[:10]}"
             graph.query(
                 f"MERGE (m:BrandMention {{mention_id: '{mention_id}'}}) "
                 f"SET m.brand_id = '{brand_id}', m.type = '{page_type}', "
                 f"    m.sentiment = '{sentiment}', m.platform = '{platform}', "
                 f"    m.rating = {rating}, m.summary = '{summary}', "
-                f"    m.complaints = '{complaints_json}', m.praises = '{praises_json}', "
+                f"    m.complaints = '{complaints}', m.praises = '{praises}', "
                 f"    m.source_url = '{url}' "
                 f"WITH m MATCH (b:Brand {{brand_id: '{brand_id}'}}) "
                 f"MERGE (b)-[:HAS_MENTION]->(m)"
             )
 
         else:
-            # General knowledge node — store summary as a KnowledgeItem
             item_id = f"{brand_id}_ki_{source_hash[:10]}"
-            facts_json = json.dumps(extracted.get("key_facts") or []).replace("'", "")
+            facts = json.dumps(extracted.get("key_facts") or []).replace("'", "")
             graph.query(
                 f"MERGE (k:KnowledgeItem {{item_id: '{item_id}'}}) "
                 f"SET k.brand_id = '{brand_id}', k.page_type = '{page_type}', "
-                f"    k.summary = '{summary}', k.key_facts = '{facts_json}', "
+                f"    k.summary = '{summary}', k.key_facts = '{facts}', "
                 f"    k.source_url = '{url}' "
                 f"WITH k MATCH (b:Brand {{brand_id: '{brand_id}'}}) "
                 f"MERGE (b)-[:HAS_KNOWLEDGE]->(k)"
             )
 
     except Exception as e:
-        log.warning("graph_write_failed", url=url, brand_id=brand_id, error=str(e))
+        log.warning("graph_write_failed", url=url, error=str(e))
 
 
 async def _write_to_pgvector(brand_id: str, url: str, extracted: dict) -> None:
-    """Write summary + key_facts as a searchable chunk to Postgres pgvector."""
     try:
         import psycopg2
-        content = "\n".join([
-            extracted.get("summary") or "",
-            *([f"Q: {p['question']}\nA: {p['answer']}" for p in extracted.get("faq_pairs") or []]),
-            *[str(f) for f in (extracted.get("key_facts") or [])],
-        ]).strip()
-
+        parts = [extracted.get("summary") or ""]
+        parts += [f"Q: {p['question']}\nA: {p['answer']}" for p in (extracted.get("faq_pairs") or [])]
+        parts += [str(f) for f in (extracted.get("key_facts") or [])]
+        content = "\n".join(parts).strip()
         if len(content) < 30:
             return
 
@@ -467,15 +534,11 @@ async def _write_to_pgvector(brand_id: str, url: str, extracted: dict) -> None:
         )
         try:
             cur = conn.cursor()
-            c_hash = content_hash(content)
             cur.execute(
-                """
-                INSERT INTO knowledge_chunks (brand_id, chunk_type, content, metadata)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-                """,
+                "INSERT INTO knowledge_chunks (brand_id, chunk_type, content, metadata) "
+                "VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING",
                 (brand_id, extracted.get("page_type", "collected"),
-                 content[:8000], json.dumps({"source_url": url, "content_hash": c_hash})),
+                 content[:8000], json.dumps({"source_url": url, "content_hash": content_hash(content)})),
             )
             conn.commit()
         finally:
@@ -495,27 +558,22 @@ async def collect_brand_data(
     resume: bool = True,
     max_urls: int = 200,
     concurrency: int = 5,
+    scrapegraph_batch_size: int = 10,
 ) -> dict[str, Any]:
     """
-    Full brand data collection pipeline.
+    Full brand data collection pipeline using crawl4ai + ScrapeGraphAI.
 
-    Args:
-        brand_id:    canonical brand identifier
-        brand_name:  human-readable brand name (used in search queries)
-        base_domain: primary domain, e.g. "boohoo.com"
-        resume:      if True, resume from saved checkpoint; False = fresh start
-        max_urls:    hard limit on total URLs to fetch per run
-        concurrency: parallel fetcher count
-
-    Returns:
-        summary dict with counts and final phase
+    - Discovery: crawl4ai BFS on brand domain + DuckDuckGo HTML scraping
+    - Extraction: ScrapeGraphAI multi-URL batch; crawl4ai single-URL fallback
+    - Storage: FalkorDB graph + Postgres pgvector chunks
+    - Dedup: Redis URL hash set + content hash map
+    - Checkpoint: Redis JSON state saved after every batch
     """
     from core.memory.session import get_redis
     r = get_redis()
     dedup = DedupTracker(brand_id, r)
     ckpt = CheckpointManager(brand_id, r)
 
-    # ── Load or create state ────────────────────────────────────────────────
     state: CollectState | None = None
     if resume:
         state = await ckpt.load(brand_id)
@@ -528,75 +586,83 @@ async def collect_brand_data(
 
     t_start = time.monotonic()
 
-    # ── Phase: SEED — crawl the brand's own domain ──────────────────────────
+    # ── Phase SEED: crawl4ai BFS on the brand's own domain ──────────────────
     if state.phase == CollectPhase.SEED:
-        seed_urls = [
-            f"https://{base_domain}/",
+        log.info("phase_seed", brand_id=brand_id)
+        seed_urls = await _deep_crawl_domain(base_domain, max_pages=40)
+        # Always include known support paths in case BFS misses them
+        fallback_seeds = [
             f"https://{base_domain}/help",
             f"https://{base_domain}/faq",
             f"https://{base_domain}/returns",
             f"https://{base_domain}/delivery",
             f"https://{base_domain}/contact",
-            f"https://{base_domain}/shipping",
-            f"https://{base_domain}/sitemap.xml",
         ]
-        for u in seed_urls:
-            if not await dedup.is_url_seen(u):
+        for u in seed_urls + fallback_seeds:
+            if u not in state.pending_urls:
                 state.pending_urls.append(u)
-
         state.phase = CollectPhase.DISCOVER
         await ckpt.save(state)
 
-    # ── Phase: DISCOVER — search web for news/reviews/social ───────────────
+    # ── Phase DISCOVER: DuckDuckGo HTML → external URLs ──────────────────────
     if state.phase == CollectPhase.DISCOVER:
-        queries = _build_search_queries(brand_name, base_domain)
-        discovered = await _search_urls(queries, max_per_query=5)
+        log.info("phase_discover", brand_id=brand_id)
+        queries = _dork_queries(brand_name, base_domain)
+        discovered = await _discover_via_duckduckgo(queries, max_per_query=6)
         for u in discovered:
-            if not await dedup.is_url_seen(u):
+            if not await dedup.is_url_seen(u) and u not in state.pending_urls:
                 state.pending_urls.append(u)
         state.phase = CollectPhase.FETCH
         await ckpt.save(state)
-        log.info("discovery_done", brand_id=brand_id, discovered=len(discovered))
+        log.info("discovery_done", brand_id=brand_id, new_urls=len(discovered))
 
-    # ── Phase: FETCH — process the URL queue ────────────────────────────────
+    # ── Phase FETCH: extract + store ─────────────────────────────────────────
     if state.phase == CollectPhase.FETCH:
-        sem = asyncio.Semaphore(concurrency)
-
-        async def _process_one(url: str) -> bool:
-            if await dedup.is_url_seen(url):
-                return False
-            await dedup.mark_url_seen(url)
-
-            async with sem:
-                extracted = await _crawl_and_extract(url, brand_id, brand_name)
-
-            if not extracted:
-                state.error_count += 1
-                return False
-
-            raw_text = json.dumps(extracted)
-            if await dedup.is_content_duplicate(raw_text):
-                return False
-            await dedup.mark_content_seen(raw_text, url)
-
-            await asyncio.gather(
-                _write_to_graph(brand_id, url, extracted),
-                _write_to_pgvector(brand_id, url, extracted),
-            )
-            state.extracted_count += 1
-            return True
-
-        processed = 0
-        queue = list(state.pending_urls)
+        log.info("phase_fetch", brand_id=brand_id, queue=len(state.pending_urls))
+        queue = [u for u in state.pending_urls if not await dedup.is_url_seen(u)]
         state.pending_urls = []
+        processed = 0
 
         while queue and processed < max_urls:
-            batch = queue[:concurrency]
-            queue = queue[concurrency:]
-            results = await asyncio.gather(*[_process_one(u) for u in batch], return_exceptions=True)
-            processed += sum(1 for r in results if r is True)
+            # Mark batch as visited immediately to avoid re-queuing
+            batch = queue[:scrapegraph_batch_size]
+            queue = queue[scrapegraph_batch_size:]
+            for u in batch:
+                await dedup.mark_url_seen(u)
+
+            # Try ScrapeGraphAI batch first
+            sg_results = await _extract_batch_scrapegraph(batch, brand_name)
+            sg_done = {url for url, _ in sg_results}
+
+            # crawl4ai fallback for any URL ScrapeGraphAI didn't handle
+            sem = asyncio.Semaphore(concurrency)
+            async def _fallback(url: str) -> tuple[str, dict | None]:
+                async with sem:
+                    extracted = await _extract_single_crawl4ai(url, brand_name)
+                return url, extracted
+
+            fallback_needed = [u for u in batch if u not in sg_done]
+            fallback_results = await asyncio.gather(*[_fallback(u) for u in fallback_needed])
+
+            all_results: list[tuple[str, dict | None]] = sg_results + list(fallback_results)
+
+            for url, extracted in all_results:
+                if not extracted:
+                    state.error_count += 1
+                    continue
+                raw = json.dumps(extracted)
+                if await dedup.is_content_duplicate(raw):
+                    continue
+                await dedup.mark_content_seen(raw, url)
+                await asyncio.gather(
+                    _write_to_graph(brand_id, url, extracted),
+                    _write_to_pgvector(brand_id, url, extracted),
+                )
+                state.extracted_count += 1
+
             state.visited_count += len(batch)
-            await ckpt.save(state)  # checkpoint after each batch
+            processed += len(batch)
+            await ckpt.save(state)  # checkpoint every batch
 
         state.phase = CollectPhase.DONE
         await ckpt.save(state)
@@ -611,7 +677,6 @@ async def collect_brand_data(
         errors=state.error_count,
         elapsed_s=elapsed,
     )
-
     return {
         "brand_id": brand_id,
         "phase": state.phase.value,
@@ -624,7 +689,6 @@ async def collect_brand_data(
 
 
 async def get_collection_status(brand_id: str) -> dict | None:
-    """Return current checkpoint state for a brand, or None if not started."""
     from core.memory.session import get_redis
     r = get_redis()
     ckpt = CheckpointManager(brand_id, r)

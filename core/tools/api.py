@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from brands.registry import BRAND_REGISTRY, get_brand_by_id
 from core.tools.registry import (
+    _MOCK_CUSTOMERS,
     _MOCK_ORDERS,
     _MOCK_RETURNS,
     _MOCK_PROMOS,
@@ -128,49 +129,53 @@ def list_customers(
     _auth: str = Depends(verify_api_key),
 ):
     """
-    List customers derived from order history.
+    List customers with their brand relationship (`CLIENT_OF`).
 
-    **Available demo brand_ids:** `boohoo_uk` · `plt_uk` · `karenmillen_uk`
-    (call `GET /api/v1/brands` for the full list)
+    Each customer belongs to exactly one brand — `brand_id` is a required attribute,
+    not derived from orders.
 
-    **Known demo customer_ids:** `cust_001` (boohoo_uk) · `cust_002` (plt_uk) · `cust_003` (karenmillen_uk)
+    **Demo brand_ids:** `boohoo_uk` · `plt_uk` · `karenmillen_uk`
+    (call `GET /api/v1/brands` for all 13)
+
+    **Demo customer_ids:** `cust_001` (boohoo_uk) · `cust_002` (plt_uk) · `cust_003` (karenmillen_uk)
     """
-    seen: dict[str, dict] = {}
-    for order in _MOCK_ORDERS.values():
-        if brand_id and order["brand_id"] != brand_id:
-            continue
-        cid = order["customer_id"]
-        if cid not in seen:
-            seen[cid] = {
-                "customer_id": cid,
-                "brand_id": order["brand_id"],
-                "order_count": 0,
-                "total_spend": 0.0,
-            }
-        seen[cid]["order_count"] += 1
-        seen[cid]["total_spend"] += order["total_value"]
-
-    customers = list(seen.values())[:limit]
-    return CustomerListResponse(total=len(customers), customers=customers)
+    custs = list(_MOCK_CUSTOMERS.values())
+    if brand_id:
+        custs = [c for c in custs if c["brand_id"] == brand_id]
+    return CustomerListResponse(total=len(custs), customers=custs[:limit])
 
 
 @router.get("/customers/{customer_id}")
 def get_customer(
     customer_id: str = Path(
-        description="Customer ID. Demo values: `cust_001` (boohoo_uk), `cust_002` (plt_uk), `cust_003` (karenmillen_uk).",
+        description="Customer ID. Demo values: `cust_001`, `cust_002`, `cust_003`.",
         example="cust_001",
     ),
     _auth: str = Depends(verify_api_key),
 ):
-    """Full customer profile — all orders and returns. Demo IDs: `cust_001`, `cust_002`, `cust_003`."""
+    """
+    Full customer profile — brand relationship, orders, returns.
+
+    The `brand` block shows which brand this customer is a client of (graph: `CLIENT_OF`).
+
+    Demo IDs: `cust_001` (boohoo_uk) · `cust_002` (plt_uk) · `cust_003` (karenmillen_uk)
+    """
+    customer = _MOCK_CUSTOMERS.get(customer_id)
+    if not customer:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Customer '{customer_id}' not found. Valid demo IDs: cust_001, cust_002, cust_003",
+        )
+    brand_entry = get_brand_by_id(customer["brand_id"])
     orders = [o for o in _MOCK_ORDERS.values() if o["customer_id"] == customer_id]
     returns = [r for r in _MOCK_RETURNS.values() if r["customer_id"] == customer_id]
-    if not orders:
-        raise HTTPException(status_code=404, detail="Customer not found")
     return {
-        "customer_id": customer_id,
-        "total_orders": len(orders),
-        "total_spend": sum(o["total_value"] for o in orders),
+        **customer,
+        "brand": {
+            "brand_id": brand_entry.brand_id if brand_entry else customer["brand_id"],
+            "name": brand_entry.name if brand_entry else "",
+            "domains": brand_entry.domains if brand_entry else [],
+        },
         "orders": orders,
         "returns": returns,
     }

@@ -61,6 +61,47 @@ _MOCK_ORDERS: dict[str, dict[str, Any]] = {
     },
 }
 
+_MOCK_CUSTOMERS: dict[str, dict[str, Any]] = {
+    "cust_001": {
+        "customer_id": "cust_001",
+        "brand_id": "boohoo_uk",
+        "name": "Alice Thompson",
+        "email": "alice@example.com",
+        "tier": "standard",
+        "locale": "en-GB",
+        "total_orders": 5,
+        "total_spend": 0.0,
+    },
+    "cust_002": {
+        "customer_id": "cust_002",
+        "brand_id": "plt_uk",
+        "name": "Sophie Clarke",
+        "email": "sophie@example.com",
+        "tier": "loyalty",
+        "locale": "en-GB",
+        "total_orders": 12,
+        "total_spend": 0.0,
+    },
+    "cust_003": {
+        "customer_id": "cust_003",
+        "brand_id": "karenmillen_uk",
+        "name": "Helena Murray",
+        "email": "helena@example.com",
+        "tier": "vip",
+        "locale": "en-GB",
+        "total_orders": 8,
+        "total_spend": 0.0,
+    },
+}
+
+# Compute total spend from orders into customer profiles
+for _order in _MOCK_ORDERS.values():
+    _cid = _order["customer_id"]
+    if _cid in _MOCK_CUSTOMERS:
+        _MOCK_CUSTOMERS[_cid]["total_spend"] = round(
+            _MOCK_CUSTOMERS[_cid]["total_spend"] + _order["total_value"], 2
+        )
+
 _MOCK_RETURNS: dict[str, dict[str, Any]] = {}
 _MOCK_PROMOS: dict[str, dict[str, Any]] = {
     "SAVE10": {"code": "SAVE10", "discount_pct": 10, "min_spend": 30, "active": True,
