@@ -31,6 +31,12 @@ from urllib.parse import urljoin, urlparse
 import httpx
 import structlog
 from langgraph.graph import END, START, StateGraph
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 from typing_extensions import TypedDict
 
 from config import settings
@@ -145,8 +151,14 @@ class AgentCollectState(TypedDict):
 # FETCH LAYER  (stealth → cache → plain httpx)
 # ═══════════════════════════════════════════════════════════════════════════
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)),
+    reraise=False,
+)
 async def _httpx_get(url: str) -> str:
-    """Plain fast fetch — works for server-rendered, unprotected pages."""
+    """Plain fast fetch with exponential backoff — works for server-rendered pages."""
     try:
         async with httpx.AsyncClient(
             timeout=_FETCH_TIMEOUT,
@@ -156,8 +168,35 @@ async def _httpx_get(url: str) -> str:
             r = await client.get(url)
             if r.status_code < 400:
                 return r.text
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError):
+        raise  # let tenacity retry these
     except Exception as e:
         log.debug("httpx_get_failed", url=url, error=str(e))
+    return ""
+
+
+async def _firecrawl_fetch(url: str) -> str:
+    """
+    FireCrawl cloud API — handles JS rendering and anti-bot protection.
+    Returns clean markdown. Only used when FIRECRAWL_API_KEY is configured.
+    FireCrawl free tier: 500 credits/month (use sparingly, only when stealth fails).
+    """
+    if not settings.firecrawl_api_key:
+        return ""
+    try:
+        from firecrawl import FirecrawlApp
+        app = FirecrawlApp(api_key=settings.firecrawl_api_key)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: app.scrape_url(url, formats=["markdown"])
+        )
+        # firecrawl-py v4 returns a ScrapeResponse pydantic model
+        md = getattr(result, "markdown", None) or (result.get("markdown") if isinstance(result, dict) else None)
+        if md and len(md.strip()) > _MIN_CONTENT_LEN:
+            log.debug("firecrawl_ok", url=url, chars=len(md))
+            return md
+    except Exception as e:
+        log.debug("firecrawl_failed", url=url, error=str(e))
     return ""
 
 
@@ -253,11 +292,12 @@ async def _wayback_machine(url: str) -> str:
 
 async def _fetch_any(url: str, expand: bool = True) -> str:
     """
-    Fetch strategy waterfall:
+    Fetch strategy waterfall (most capable → fastest):
       1. Stealth crawl4ai  (handles JS SPAs, expands accordions)
-      2. Google Cache       (bypasses Akamai / rate-limiting)
-      3. Wayback Machine    (archival fallback)
-      4. Plain httpx        (fast, for simple static pages)
+      2. FireCrawl          (cloud anti-bot bypass — only if API key set)
+      3. Google Cache       (bypasses Akamai / rate-limiting)
+      4. Wayback Machine    (archival fallback)
+      5. Plain httpx        (fast, for simple static pages)
 
     Returns the richest non-empty response found.
     """
@@ -267,19 +307,25 @@ async def _fetch_any(url: str, expand: bool = True) -> str:
         log.debug("fetch_stealth_ok", url=url, chars=len(content))
         return content
 
-    # Strategy 2: Google Cache
+    # Strategy 2: FireCrawl (cloud — handles Cloudflare/Akamai when stealth fails)
+    fc = await _firecrawl_fetch(url)
+    if len(fc.strip()) >= _MIN_CONTENT_LEN:
+        log.debug("fetch_firecrawl_ok", url=url, chars=len(fc))
+        return fc
+
+    # Strategy 3: Google Cache
     cached = await _google_cache(url)
     if len(cached.strip()) >= _MIN_CONTENT_LEN:
         log.debug("fetch_cache_ok", url=url, chars=len(cached))
         return cached
 
-    # Strategy 3: Wayback Machine
+    # Strategy 4: Wayback Machine
     archived = await _wayback_machine(url)
     if len(archived.strip()) >= _MIN_CONTENT_LEN:
         log.debug("fetch_wayback_ok", url=url, chars=len(archived))
         return archived
 
-    # Strategy 4: plain httpx
+    # Strategy 5: plain httpx
     plain = await _httpx_get(url)
     if plain:
         log.debug("fetch_httpx_ok", url=url, chars=len(plain))
@@ -407,12 +453,35 @@ async def _sitemap_help_urls(base_url: str):
 
 
 async def _ddg_search(brand_name: str, domain: str) -> list[str]:
-    """DuckDuckGo HTML search for brand help pages."""
+    """
+    DuckDuckGo search for brand help pages.
+    Primary: duckduckgo-search library (structured results, more reliable).
+    Fallback: DuckDuckGo HTML scraping.
+    """
     domain_base = domain.replace("www.", "")
-    query = f'site:{domain} help OR faq OR "returns policy" OR "customer service"'
+    query = f'site:{domain_base} help OR faq OR "returns policy" OR "customer service"'
+    found: list[str] = []
+
+    # Primary: duckduckgo-search library
+    try:
+        from duckduckgo_search import DDGS
+        results = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: list(DDGS().text(query, max_results=25))
+        )
+        for r in results:
+            href = r.get("href", "")
+            if href and domain_base in href and href.startswith("http"):
+                found.append(href.split("?")[0])
+        if found:
+            log.debug("ddg_library_ok", domain=domain_base, count=len(found))
+            return list(dict.fromkeys(found))[:30]
+    except Exception as e:
+        log.debug("ddg_library_failed", error=str(e))
+
+    # Fallback: DuckDuckGo HTML scraping
     encoded = query.replace(" ", "+").replace(":", "%3A").replace('"', "%22")
     text = await _httpx_get(f"https://html.duckduckgo.com/html/?q={encoded}")
-    found: list[str] = []
     if text:
         for m in re.finditer(r'uddg=([^&"\']+)', text):
             import urllib.parse
@@ -1286,6 +1355,194 @@ async def node_synthesize(state: AgentCollectState) -> dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# NODE 3.5 — Ontology review: deduplicate + enrich proposals from subagents
+# ═══════════════════════════════════════════════════════════════════════════
+
+_BUILTIN_ENTITY_TYPES = {"FAQ", "Policy", "KnowledgeItem", "Review", "ProductCategory", "Brand", "IssueType"}
+
+async def node_ontology_review(state: AgentCollectState) -> dict[str, Any]:
+    """
+    Ontology review agent — runs after collect, before synthesize.
+
+    Receives all raw proposals raised by extraction subagents (often duplicated
+    across many pages) and:
+    1. Deduplicates semantically similar proposals (ReturnPolicy ≈ ReturnsPolicy)
+    2. Rejects proposals that are just aliases of built-in types
+    3. Enriches surviving proposals with better descriptions and properties
+    4. Returns a curated list ready for _apply_proposals()
+    """
+    proposals = state["ontology_proposals"]
+    if not proposals:
+        return {}
+
+    # Deduplicate by label before even calling the LLM
+    seen_labels: dict[str, dict] = {}
+    for p in proposals:
+        label = p.get("label", "").strip()
+        if not label:
+            continue
+        if label not in seen_labels:
+            seen_labels[label] = p
+        else:
+            # Merge evidence
+            existing = seen_labels[label]
+            existing["evidence"] = (existing.get("evidence", "") + "; " + p.get("evidence", "")).strip("; ")
+
+    raw_unique = list(seen_labels.values())
+    if not raw_unique:
+        return {}
+
+    log.info("ontology_review_start", brand_id=state["brand_id"], raw_proposals=len(proposals), unique=len(raw_unique))
+
+    # If only 1-2 proposals and none overlap with builtins, skip LLM review
+    non_builtin = [p for p in raw_unique if p.get("label") not in _BUILTIN_ENTITY_TYPES]
+    if not non_builtin:
+        log.info("ontology_review_all_builtin", brand_id=state["brand_id"])
+        return {"ontology_proposals": []}
+
+    llm = get_llm_client()
+    proposals_json = json.dumps(non_builtin, indent=2)
+
+    prompt = textwrap.dedent(f"""
+        You are an ontology architect reviewing entity type proposals raised by AI data
+        collection agents for an e-commerce customer support knowledge graph.
+
+        Built-in types that already exist (DO NOT re-propose these):
+        {', '.join(sorted(_BUILTIN_ENTITY_TYPES))}
+
+        Raw proposals from collection agents:
+        {proposals_json}
+
+        Your task:
+        1. DEDUPLICATE: merge proposals that mean the same thing (e.g. ReturnPolicy and
+           ReturnsPolicy both mean the same type → keep the cleaner name).
+        2. VALIDATE: reject proposals that are just aliases of built-in types above.
+        3. REJECT: remove proposals that are too vague (e.g. "Content", "Page", "Item").
+        4. ENRICH: for proposals that pass, improve the description and add useful
+           property names. Think: what fields would a customer-service agent need?
+        5. APPROVE: keep proposals that represent genuinely distinct knowledge entities
+           specific to e-commerce support (e.g. SizeGuide, WarrantyPolicy, LoyaltyProgram,
+           DeliveryZone, ContactMethod, PromotionPolicy, OrderStatus).
+
+        Return ONLY valid JSON (no markdown fences):
+        {{
+            "approved": [
+                {{
+                    "label": "SizeGuide",
+                    "description": "Brand-specific size guide tables for clothing categories",
+                    "properties": ["brand_id", "category", "size_chart", "measurement_unit", "source_url"],
+                    "relationships": [["Brand", "HAS_SIZE_GUIDE", "incoming"]],
+                    "evidence": "Found on women's clothing pages and dedicated size guide page",
+                    "review_notes": "Distinct from FAQ — structured tabular data"
+                }}
+            ],
+            "rejected": [
+                {{"label": "Policy", "reason": "duplicate of built-in Policy type"}}
+            ]
+        }}
+    """).strip()
+
+    try:
+        raw = await llm.generate(prompt, max_tokens=2048, fast=False)
+        m = re.search(r'\{[\s\S]+\}', raw)
+        if m:
+            data = json.loads(m.group(0))
+            approved = data.get("approved", [])
+            rejected = data.get("rejected", [])
+            log.info(
+                "ontology_review_done",
+                brand_id=state["brand_id"],
+                approved=len(approved),
+                rejected=len(rejected),
+            )
+            return {"ontology_proposals": approved}
+    except Exception as e:
+        log.warning("ontology_review_failed", error=str(e))
+
+    # On failure, return the deduplicated non-builtin proposals as-is
+    return {"ontology_proposals": non_builtin}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BRAND SCRAPING PROBE
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def probe_site_access(base_url: str) -> dict[str, Any]:
+    """
+    Test what level of access we have to a site without full browser overhead.
+
+    Returns a report with:
+    - plain_httpx: can we GET the homepage with plain httpx?
+    - content_rich: does the plain response have substantial content (>2000 chars)?
+    - bot_protected: does the plain response look like a bot-gate page?
+    - recommended_strategy: which fetch strategy to prefer for this site
+    - response_chars: char count of the best plain response
+    """
+    report: dict[str, Any] = {
+        "url": base_url,
+        "plain_httpx": False,
+        "content_rich": False,
+        "bot_protected": False,
+        "firecrawl_available": bool(settings.firecrawl_api_key),
+        "recommended_strategy": "stealth",
+        "response_chars": 0,
+        "notes": [],
+    }
+
+    # Test 1: bare httpx (no UA header)
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+            r = await client.get(base_url)
+            if r.status_code < 400:
+                report["plain_httpx"] = True
+                report["response_chars"] = len(r.text)
+                text_lower = r.text.lower()
+
+                # Bot-gate signals
+                bot_signals = ["access denied", "cloudflare", "just a moment", "enable javascript",
+                               "captcha", "unusual traffic", "403 forbidden", "please verify"]
+                if any(s in text_lower for s in bot_signals):
+                    report["bot_protected"] = True
+                    report["notes"].append("Bot-gate detected in plain response")
+                elif len(r.text) > 2000:
+                    report["content_rich"] = True
+
+    except Exception as e:
+        report["notes"].append(f"Plain httpx failed: {e}")
+
+    # Test 2: httpx with browser UA
+    try:
+        async with httpx.AsyncClient(
+            timeout=10,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"},
+        ) as client:
+            r = await client.get(base_url)
+            if r.status_code < 400 and len(r.text) > report["response_chars"]:
+                report["response_chars"] = len(r.text)
+                text_lower = r.text.lower()
+                if not any(s in text_lower for s in ["access denied", "cloudflare", "just a moment", "captcha"]):
+                    if len(r.text) > 2000:
+                        report["content_rich"] = True
+                        report["notes"].append("UA-spoofed httpx returns rich content — stealth browser may be unnecessary")
+    except Exception:
+        pass
+
+    # Recommend strategy
+    if report["content_rich"] and not report["bot_protected"]:
+        report["recommended_strategy"] = "httpx"
+        report["notes"].append("Site appears unprotected — plain httpx sufficient")
+    elif settings.firecrawl_api_key:
+        report["recommended_strategy"] = "firecrawl"
+        report["notes"].append("Bot protection detected — FireCrawl recommended")
+    else:
+        report["recommended_strategy"] = "stealth"
+        report["notes"].append("Bot protection detected — stealth browser required")
+
+    return report
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # GRAPH CONSTRUCTION + PUBLIC API
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1293,10 +1550,12 @@ def _build_graph() -> StateGraph:
     b = StateGraph(AgentCollectState)
     b.add_node("orchestrate", node_orchestrate)
     b.add_node("collect", node_collect)
+    b.add_node("ontology_review", node_ontology_review)
     b.add_node("synthesize", node_synthesize)
     b.add_edge(START, "orchestrate")
     b.add_edge("orchestrate", "collect")
-    b.add_edge("collect", "synthesize")
+    b.add_edge("collect", "ontology_review")
+    b.add_edge("ontology_review", "synthesize")
     b.add_edge("synthesize", END)
     return b.compile()
 

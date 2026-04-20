@@ -857,21 +857,21 @@ async def system_overview():
         pass
 
     pg_stats = {}
-    try:
-        import psycopg2
-        conn = psycopg2.connect(
-            host=settings.postgres_host, port=settings.postgres_port,
-            dbname=settings.postgres_db, user=settings.postgres_user,
-            password=settings.postgres_password,
-        )
+    if settings.postgres_host:
         try:
-            cur = conn.cursor()
-            cur.execute("SELECT brand_id, count(*) FROM knowledge_chunks GROUP BY brand_id")
-            pg_stats = dict(cur.fetchall())
-        finally:
-            conn.close()
-    except Exception:
-        pass
+            import psycopg
+            conn_str = (
+                f"host={settings.postgres_host} port={settings.postgres_port} "
+                f"dbname={settings.postgres_db} user={settings.postgres_user} "
+                f"password={settings.postgres_password}"
+            )
+            async with await psycopg.AsyncConnection.connect(conn_str) as conn:
+                rows = await (await conn.execute(
+                    "SELECT brand_id, count(*) FROM knowledge_chunks GROUP BY brand_id"
+                )).fetchall()
+                pg_stats = {r[0]: r[1] for r in rows}
+        except Exception:
+            pass
 
     return {
         "services": {
@@ -962,6 +962,34 @@ async def brand_collection_status(brand_id: str):
             detail=f"No collection started for '{brand_id}'. Call POST /admin/brands/{brand_id}/collect first.",
         )
     return status
+
+
+@admin_router.get("/brands/{brand_id}/probe", tags=["Brands"])
+async def probe_brand_scraping(brand_id: str):
+    """
+    Probe a brand's website to determine whether bot protection is active
+    and which scraping strategy is recommended.
+
+    Returns:
+    - **plain_httpx**: whether plain HTTP GET works at all
+    - **content_rich**: whether the plain response has real page content (>2000 chars)
+    - **bot_protected**: whether bot-gate signals (Cloudflare, CAPTCHA, etc.) were detected
+    - **recommended_strategy**: `httpx` (no protection) | `stealth` (Playwright) | `firecrawl` (cloud bypass)
+    - **firecrawl_available**: whether a FireCrawl API key is configured
+
+    Brands that return **recommended_strategy: httpx** can be scraped cheaply without
+    launching a headless browser — much faster and more reliable.
+    """
+    from brands.registry import get_brand_by_id
+    from ingestion.agent_collector import probe_site_access
+
+    entry = get_brand_by_id(brand_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not found.")
+
+    base_url = f"https://{entry.domains[0]}" if entry.domains else f"https://{brand_id}.com"
+    report = await probe_site_access(base_url)
+    return report
 
 
 # Register admin router
