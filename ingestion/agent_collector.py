@@ -1,0 +1,1382 @@
+"""
+Agent-driven brand data collection pipeline.
+
+Architecture:
+  1. Orchestrator agent  — finds the brand's help-center entry points via
+     sitemap, DuckDuckGo search, and LLM URL generation.
+  2. BFS collector (sub-agents in parallel) — starts at those entry points
+     and dynamically follows links level by level, like a real user browsing.
+     Each page is fetched with full stealth Playwright (headless Chrome,
+     stealth JS patches, accordion expansion, simulated user behaviour).
+     For Akamai/Cloudflare-protected pages the fetcher automatically falls
+     back to Google Cache → Wayback Machine → httpx.
+  3. Synthesis node — writes extracted items to FalkorDB + pgvector,
+     applies any ontology proposals raised by sub-agents.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import random
+import re
+import textwrap
+import time
+import uuid
+import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urljoin, urlparse
+
+import httpx
+import structlog
+from langgraph.graph import END, START, StateGraph
+from typing_extensions import TypedDict
+
+from config import settings
+from core.orchestration.llm import get_llm_client
+
+log = structlog.get_logger(__name__)
+
+# ── Constants ──────────────────────────────────────────────────────────────
+_BFS_BATCH = 4               # concurrent pages per BFS round
+_MAX_URLS_DEFAULT = 60       # total page cap per collection run
+_FETCH_TIMEOUT = 25          # seconds
+_MIN_CONTENT_LEN = 300       # skip pages shorter than this (404s, bot gates)
+_HELP_KEYWORDS = [
+    "help", "faq", "question", "support", "return", "refund", "cancel",
+    "order", "ship", "deliver", "dispatch", "policy", "contact", "about",
+    "customer-service", "helpcentre", "care", "exchange", "size", "payment",
+]
+_SKIP_PATH_FRAGMENTS = [
+    "/cart", "/checkout", "/login", "/register", "/account", "/wishlist",
+    "/search", ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+    ".ico", "/products/", "/product/", "/collections/", "/categories/",
+    "/category/", "/womens/", "/mens/", "/girls/", "/boys/", "/kids/",
+    "/beauty/", "/skincare/", "/new-in/", "/sale/", "/offers/",
+    "?page=", "?sort=", "?colour=", "/blog/", "/news/",
+    "/basket", "/bag", "/store-locator", "/sitemap",
+]
+
+_CATEGORIES = [
+    "faq", "returns_policy", "shipping_policy", "contact",
+    "about", "blog_news", "product_guide", "review",
+]
+
+# ── JS injected before each page to neutralise bot-detection signals ──────
+_STEALTH_INIT_JS = """
+(function() {
+    try {
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'plugins', {get: () => [
+            {name:'Chrome PDF Plugin'},{name:'Chrome PDF Viewer'},
+            {name:'Native Client'}
+        ]});
+        Object.defineProperty(navigator, 'languages', {
+            get: () => ['en-US','en','en-GB']
+        });
+        const origQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (params) =>
+            params.name === 'notifications'
+                ? Promise.resolve({state: Notification.permission})
+                : origQuery(params);
+    } catch(e) {}
+})();
+"""
+
+# JS to expand accordion/collapsible FAQ sections so the answers become
+# part of the rendered DOM before crawl4ai takes the snapshot.
+_EXPAND_CONTENT_JS = """
+(async function() {
+    const selectors = [
+        'details:not([open]) > summary',
+        '[aria-expanded="false"]',
+        '.accordion-button.collapsed',
+        '[data-bs-toggle="collapse"][aria-expanded="false"]',
+        '.faq-item:not(.active) .faq-question',
+        '.faq-question:not(.open)',
+        '[role="button"][aria-expanded="false"]',
+        '.collapsible-header',
+        '.help-topic-item',
+        '.question-row',
+        '[data-expandable]',
+    ];
+    let clicked = 0;
+    for (const sel of selectors) {
+        for (const el of document.querySelectorAll(sel)) {
+            try { el.click(); clicked++; } catch(e) {}
+        }
+    }
+    if (clicked > 0) await new Promise(r => setTimeout(r, 1800));
+    // Second pass for nested accordions revealed by first click
+    for (const sel of selectors.slice(0,3)) {
+        for (const el of document.querySelectorAll(sel)) {
+            try { el.click(); } catch(e) {}
+        }
+    }
+    if (clicked > 0) await new Promise(r => setTimeout(r, 800));
+    return clicked;
+})();
+"""
+
+
+# ── LangGraph state ────────────────────────────────────────────────────────
+
+class AgentCollectState(TypedDict):
+    brand_id: str
+    brand_name: str
+    base_url: str
+    max_urls: int
+
+    # Orchestrator output — entry-point URLs for the BFS collector
+    entry_points: list[str]
+
+    # BFS collector output
+    extracted_items: list[dict[str, Any]]
+    ontology_proposals: list[dict[str, Any]]
+
+    phase: str
+    errors: list[str]
+    extracted_count: int
+    started_at: str
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FETCH LAYER  (stealth → cache → plain httpx)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _httpx_get(url: str) -> str:
+    """Plain fast fetch — works for server-rendered, unprotected pages."""
+    try:
+        async with httpx.AsyncClient(
+            timeout=_FETCH_TIMEOUT,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"},
+        ) as client:
+            r = await client.get(url)
+            if r.status_code < 400:
+                return r.text
+    except Exception as e:
+        log.debug("httpx_get_failed", url=url, error=str(e))
+    return ""
+
+
+async def _stealth_crawl(url: str, expand: bool = True) -> str:
+    """
+    Full stealth Playwright fetch via crawl4ai:
+    - enable_stealth (playwright-stealth plugin)
+    - magic + simulate_user (randomised mouse / delays)
+    - override_navigator (webdriver = undefined etc.)
+    - JS accordion expansion
+    - Non-headless Chrome UA
+    """
+    try:
+        from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+
+        browser_cfg = BrowserConfig(
+            headless=True,
+            browser_type="chromium",
+            user_agent_mode="random",
+            enable_stealth=True,
+            extra_args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--window-size=1920,1080",
+            ],
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9,en-GB;q=0.8",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+            },
+        )
+
+        js_scripts = [_STEALTH_INIT_JS]
+        if expand:
+            js_scripts.append(_EXPAND_CONTENT_JS)
+
+        run_cfg = CrawlerRunConfig(
+            magic=True,
+            simulate_user=True,
+            override_navigator=True,
+            js_code=js_scripts,
+            delay_before_return_html=2.5 if expand else 1.5,
+            word_count_threshold=5,
+            page_timeout=30000,
+            remove_overlay_elements=True,
+        )
+
+        async with AsyncWebCrawler(config=browser_cfg) as crawler:
+            result = await crawler.arun(url=url, config=run_cfg)
+            # Prefer raw HTML: lxml link extraction needs <a href> tags.
+            # trafilatura will clean it for the LLM extraction step.
+            return result.html or result.markdown or ""
+
+    except TypeError as e:
+        log.debug("stealth_type_error", url=url, reason=str(e))
+    except Exception as e:
+        log.debug("stealth_failed", url=url, error=str(e))
+    return ""
+
+
+async def _google_cache(url: str) -> str:
+    """Google Cache fallback — useful for pages behind Akamai/Cloudflare."""
+    cache_url = f"https://webcache.googleusercontent.com/search?q=cache:{url}"
+    text = await _httpx_get(cache_url)
+    if text and len(text.strip()) > 500 and "cache" in text.lower():
+        return text
+    return ""
+
+
+async def _wayback_machine(url: str) -> str:
+    """Wayback Machine (Archive.org) fallback."""
+    try:
+        avail = await _httpx_get(
+            f"https://archive.org/wayback/available?url={url}"
+        )
+        if avail:
+            snap = json.loads(avail).get("archived_snapshots", {}).get("closest", {})
+            arch_url = snap.get("url", "")
+            if arch_url and snap.get("available"):
+                text = await _httpx_get(arch_url)
+                if text and len(text) > 500:
+                    log.info("wayback_hit", url=url, archive=arch_url)
+                    return text
+    except Exception as e:
+        log.debug("wayback_failed", url=url, error=str(e))
+    return ""
+
+
+async def _fetch_any(url: str, expand: bool = True) -> str:
+    """
+    Fetch strategy waterfall:
+      1. Stealth crawl4ai  (handles JS SPAs, expands accordions)
+      2. Google Cache       (bypasses Akamai / rate-limiting)
+      3. Wayback Machine    (archival fallback)
+      4. Plain httpx        (fast, for simple static pages)
+
+    Returns the richest non-empty response found.
+    """
+    # Strategy 1: stealth browser
+    content = await _stealth_crawl(url, expand=expand)
+    if len(content.strip()) >= _MIN_CONTENT_LEN:
+        log.debug("fetch_stealth_ok", url=url, chars=len(content))
+        return content
+
+    # Strategy 2: Google Cache
+    cached = await _google_cache(url)
+    if len(cached.strip()) >= _MIN_CONTENT_LEN:
+        log.debug("fetch_cache_ok", url=url, chars=len(cached))
+        return cached
+
+    # Strategy 3: Wayback Machine
+    archived = await _wayback_machine(url)
+    if len(archived.strip()) >= _MIN_CONTENT_LEN:
+        log.debug("fetch_wayback_ok", url=url, chars=len(archived))
+        return archived
+
+    # Strategy 4: plain httpx
+    plain = await _httpx_get(url)
+    if plain:
+        log.debug("fetch_httpx_ok", url=url, chars=len(plain))
+        return plain
+
+    log.info("fetch_all_failed", url=url)
+    return ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LINK HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _extract_links(html: str, base_url: str, same_domain_only: bool = True) -> list[str]:
+    """
+    Extract clean on-domain links from HTML using lxml DOM parser.
+    Falls back to regex for markdown/plain-text content.
+    """
+    base_p = urlparse(base_url)
+    links: list[str] = []
+
+    def _is_valid_path(path: str) -> bool:
+        """Reject paths with embedded hostnames or email addresses in segments.
+        Catches: /pages/informational/www.ravelin.com/...  and  /DPO@boohoo.com"""
+        if "@" in path:
+            return False
+        for seg in path.split("/"):
+            # Path segment that starts with www. is always a mis-resolved external URL
+            if seg.startswith("www."):
+                return False
+        return True
+
+    # Try lxml DOM parsing (real links only — no regex hallucination)
+    if "<a " in html or "<A " in html:
+        try:
+            import lxml.html
+            root = lxml.html.fromstring(html, base_url=base_url)
+            root.make_links_absolute(base_url, resolve_base_href=True)
+            for el, _, href, _ in root.iterlinks():
+                if el.tag.lower() != "a" or not href:
+                    continue
+                p = urlparse(href)
+                if p.scheme not in ("http", "https"):
+                    continue
+                if same_domain_only and p.netloc != base_p.netloc:
+                    continue
+                if not _is_valid_path(p.path):
+                    continue
+                clean = f"{p.scheme}://{p.netloc}{p.path}"
+                if any(skip in clean.lower() for skip in _SKIP_PATH_FRAGMENTS):
+                    continue
+                links.append(clean)
+            return list(dict.fromkeys(links))
+        except Exception:
+            pass
+
+    # Fallback: regex for markdown-style [text](url) or href= patterns
+    for m in re.finditer(r'href=["\']([^"\'#\s]+)["\']|\]\(([^)\s#]+)\)', html):
+        href = m.group(1) or m.group(2)
+        if not href:
+            continue
+        full = urljoin(base_url, href)
+        p = urlparse(full)
+        if same_domain_only and p.netloc != base_p.netloc:
+            continue
+        if p.scheme not in ("http", "https"):
+            continue
+        if not _is_valid_path(p.path):
+            continue
+        clean = f"{p.scheme}://{p.netloc}{p.path}"
+        if any(skip in clean.lower() for skip in _SKIP_PATH_FRAGMENTS):
+            continue
+        links.append(clean)
+    return list(dict.fromkeys(links))
+
+
+def _is_help_link(url: str) -> bool:
+    return any(kw in url.lower() for kw in _HELP_KEYWORDS)
+
+
+def _guess_category(url: str) -> str:
+    u = url.lower()
+    if any(k in u for k in ["return", "refund", "exchange"]):
+        return "returns_policy"
+    if any(k in u for k in ["ship", "deliver", "dispatch"]):
+        return "shipping_policy"
+    if any(k in u for k in ["contact", "reach-us"]):
+        return "contact"
+    if any(k in u for k in ["about", "our-story"]):
+        return "about"
+    return "faq"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DISCOVERY HELPERS (for the orchestrator)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _sitemap_help_urls(base_url: str):
+    domain = urlparse(base_url).netloc
+    for path in ["/sitemap.xml", "/sitemap_index.xml"]:
+        text = await _httpx_get(f"https://{domain}{path}")
+        if not text or "<" not in text:
+            continue
+        try:
+            root = ET.fromstring(text)
+            ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+            # sub-sitemaps
+            for sub in [e.text for e in root.findall(".//sm:loc", ns) if e.text and "sitemap" in e.text.lower()][:3]:
+                st = await _httpx_get(sub)
+                if st:
+                    try:
+                        sr = ET.fromstring(st)
+                        for e in sr.findall(".//sm:loc", ns):
+                            if e.text and _is_help_link(e.text):
+                                yield e.text
+                    except ET.ParseError:
+                        pass
+            # direct locs
+            for e in root.findall(".//sm:loc", ns):
+                if e.text and "sitemap" not in e.text and _is_help_link(e.text):
+                    yield e.text
+            return
+        except ET.ParseError:
+            continue
+
+
+async def _ddg_search(brand_name: str, domain: str) -> list[str]:
+    """DuckDuckGo HTML search for brand help pages."""
+    domain_base = domain.replace("www.", "")
+    query = f'site:{domain} help OR faq OR "returns policy" OR "customer service"'
+    encoded = query.replace(" ", "+").replace(":", "%3A").replace('"', "%22")
+    text = await _httpx_get(f"https://html.duckduckgo.com/html/?q={encoded}")
+    found: list[str] = []
+    if text:
+        for m in re.finditer(r'uddg=([^&"\']+)', text):
+            import urllib.parse
+            href = urllib.parse.unquote(m.group(1))
+            if domain_base in href and href.startswith("http"):
+                found.append(href.split("?")[0])
+        for m in re.finditer(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"', text):
+            href = m.group(1)
+            if domain_base in href and href.startswith("http"):
+                found.append(href.split("?")[0])
+    return list(dict.fromkeys(found))[:30]
+
+
+async def _llm_entry_points(llm, brand_name: str, base_url: str, known: list[str]) -> list[str]:
+    """LLM generates likely help-center entry point URLs."""
+    domain = urlparse(base_url).netloc
+    known_txt = "\n".join(f"- {u}" for u in known[:15]) or "(none found)"
+    prompt = textwrap.dedent(f"""
+        Brand: {brand_name}   Domain: {base_url}
+        Known pages so far:\n{known_txt}
+
+        Generate up to 10 realistic entry-point URLs for this brand's customer
+        support help centre (FAQ, returns, shipping, contact, help centre root).
+        Only URLs on {domain}. Respond with a JSON array only:
+        ["https://...", ...]
+    """).strip()
+    try:
+        raw = await llm.generate(prompt, max_tokens=512, fast=True)
+        m = re.search(r'\[[\s\S]+?\]', raw)
+        if m:
+            urls = json.loads(m.group(0))
+            return [u for u in urls if isinstance(u, str) and domain in u and u.startswith("http")]
+    except Exception as e:
+        log.debug("llm_entry_failed", error=str(e))
+    return []
+
+
+async def _ai_research_help_center(
+    llm,
+    brand_name: str,
+    base_url: str,
+    homepage_html: str,
+    ddg_results: list[str],
+) -> list[str]:
+    """
+    AI research agent: given the homepage HTML and DDG results, reason about
+    where this brand's customer help/support centre actually lives.
+
+    The agent looks at every real link on the homepage plus search results,
+    then returns the URLs most likely to contain FAQs, policies, and support
+    content — filtering out product pages, category listings, and other
+    non-support pages.
+    """
+    domain = urlparse(base_url).netloc
+
+    # Extract all real DOM links from the homepage
+    all_links = _extract_links(homepage_html, base_url, same_domain_only=False)
+    # Focus: same-domain + subdomains (e.g. support.brand.com)
+    base_domain = domain.lstrip("www.")
+    relevant_links = [u for u in all_links if base_domain in u][:80]
+
+    links_section = "\n".join(relevant_links) if relevant_links else "(none found)"
+    ddg_section = "\n".join(ddg_results[:20]) if ddg_results else "(none found)"
+
+    prompt = textwrap.dedent(f"""
+        You are a research agent finding the customer support section of an e-commerce website.
+
+        Brand: {brand_name}
+        Website: {base_url}
+
+        === Links found on the homepage ===
+        {links_section}
+
+        === DuckDuckGo search results for "{brand_name} help centre FAQ returns" ===
+        {ddg_section}
+
+        Task: Identify ALL URLs that lead to customer support content:
+        - Help centre / FAQ pages
+        - Returns & refund policy
+        - Shipping & delivery policy
+        - Contact / live chat
+        - Order tracking
+        - Size guides
+        - Any subdomain like support.{base_domain} or help.{base_domain}
+
+        EXCLUDE: product pages, category listings, checkout, login, blog posts, sale pages.
+
+        Return ONLY a JSON array of URLs, most important first. Include the full URL.
+        If the help centre is on a subdomain (support.{base_domain}), include it.
+        ["https://...", ...]
+    """).strip()
+
+    try:
+        raw = await llm.generate(prompt, max_tokens=1024, fast=False)
+        m = re.search(r'\[[\s\S]+?\]', raw)
+        if m:
+            urls = json.loads(m.group(0))
+            valid = [
+                u for u in urls
+                if isinstance(u, str) and u.startswith("http") and base_domain in u
+                and not any(skip in u.lower() for skip in _SKIP_PATH_FRAGMENTS)
+            ]
+            log.info("ai_research_found", brand=brand_name, count=len(valid), urls=valid[:5])
+            return valid
+    except Exception as e:
+        log.warning("ai_research_failed", error=str(e))
+    return []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CONTENT EXTRACTION HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _extract_clean_text(html_or_markdown: str) -> str:
+    """
+    Convert raw HTML to clean readable text via trafilatura.
+    trafilatura removes navigation bars, headers, footers, sidebars,
+    and script/style tags — leaving only the main body content.
+    Falls back to regex stripping if trafilatura returns nothing.
+    """
+    # If it's already markdown (crawl4ai returns .markdown), it's mostly clean
+    if not ("<html" in html_or_markdown.lower() or "<body" in html_or_markdown.lower()):
+        clean = re.sub(r'\s+', ' ', html_or_markdown).strip()
+        return clean
+
+    try:
+        import trafilatura
+        text = trafilatura.extract(
+            html_or_markdown,
+            include_tables=True,
+            include_links=False,
+            favor_precision=False,
+            no_fallback=False,
+        )
+        if text and len(text.strip()) > 100:
+            return text.strip()
+    except Exception:
+        pass
+
+    # Regex fallback
+    clean = re.sub(r'<[^>]+>', ' ', html_or_markdown)
+    return re.sub(r'\s+', ' ', clean).strip()
+
+
+async def _validate_candidates(urls: list[str], timeout: float = 8.0) -> list[str]:
+    """
+    HEAD-check each URL, keeping only those that respond with <400.
+    Boohoo's catch-all redirects 404s to a 200 offers page — we can't
+    distinguish those via HEAD alone, but we CAN reject hard 404s and
+    connection errors so LLM-hallucinated paths don't pollute the queue.
+    """
+    async def _alive(url: str) -> str | None:
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            ) as client:
+                r = await client.head(url)
+                return url if r.status_code < 400 else None
+        except Exception:
+            return None
+
+    tasks = [_alive(u) for u in urls]
+    results = await asyncio.gather(*tasks)
+    valid = [u for u in results if u is not None]
+    log.info("url_validation", total=len(urls), valid=len(valid))
+    return valid
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# LLM EXTRACTION
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _is_help_content(text: str) -> bool:
+    """Quick check: does this text contain any customer support content?"""
+    signals = [
+        "return", "refund", "shipping", "delivery", "order", "cancel",
+        "how do i", "how can i", "faq", "frequently asked", "contact us",
+        "customer service", "exchange", "size guide", "payment",
+        "track", "dispatch", "policy", "help", "support",
+    ]
+    text_lower = text.lower()
+    return sum(1 for s in signals if s in text_lower) >= 3
+
+
+def _find_content_chunks(text: str, chunk_size: int = 6000, max_chunks: int = 6) -> list[str]:
+    """
+    Split page text into overlapping chunks, prioritising sections that
+    contain customer-support signals.
+
+    Strategy:
+    1. Find all positions where help-related keywords occur
+    2. Build chunks centred on those positions (deduplicated by overlap)
+    3. Fall back to sequential chunks if no keywords found
+
+    This solves the problem of a 230K-char page where FAQs live at position
+    40K — we find them instead of blindly windowing the first/middle 8K.
+    """
+    if not text:
+        return []
+
+    # Keyword positions that signal help/support content
+    markers = [
+        "how do i", "how can i", "what is", "what are", "can i",
+        "do you", "when will", "how long", "free return", "return policy",
+        "refund", "shipping policy", "delivery time", "frequently asked",
+        "faq", "help &", "contact us", "size guide", "payment method",
+        "how to return", "how to track", "cancel my order",
+    ]
+    text_lower = text.lower()
+    anchor_positions: list[int] = []
+    for marker in markers:
+        idx = 0
+        while True:
+            idx = text_lower.find(marker, idx)
+            if idx == -1:
+                break
+            anchor_positions.append(max(0, idx - 200))
+            idx += len(marker)
+
+    if anchor_positions:
+        # Sort and deduplicate anchors that are < chunk_size apart
+        anchor_positions.sort()
+        deduplicated: list[int] = [anchor_positions[0]]
+        for pos in anchor_positions[1:]:
+            if pos - deduplicated[-1] > chunk_size * 0.7:
+                deduplicated.append(pos)
+
+        chunks: list[str] = []
+        for start in deduplicated[:max_chunks]:
+            chunk = text[start: start + chunk_size]
+            if len(chunk.strip()) >= _MIN_CONTENT_LEN:
+                chunks.append(chunk)
+        if chunks:
+            return chunks
+
+    # Fallback: sequential chunks (skip first 10% which is usually nav)
+    skip = min(len(text) // 10, 3000)
+    chunks = []
+    pos = skip
+    while pos < len(text) and len(chunks) < max_chunks:
+        chunk = text[pos: pos + chunk_size]
+        if len(chunk.strip()) >= _MIN_CONTENT_LEN:
+            chunks.append(chunk)
+        pos += chunk_size
+    return chunks
+
+
+async def _extract_chunk(
+    llm,
+    url: str,
+    category: str,
+    chunk: str,
+    brand_id: str,
+    brand_name: str,
+    ontology_labels: str,
+) -> tuple[list[dict], list[dict]]:
+    """Run LLM extraction on a single content chunk."""
+    prompt = textwrap.dedent(f"""
+        Brand: {brand_name} (brand_id: {brand_id})
+        URL: {url}  |  Category hint: {category}
+        Already-known entity types: {ontology_labels}
+
+        Page content snippet:
+        {chunk}
+
+        Task 1 — EXTRACT every piece of customer-support knowledge:
+        Every Q&A pair, policy clause, shipping rule, size guide entry, contact
+        detail, order/returns step, or any fact a customer-service agent would use.
+        Map each item to the best known entity type (FAQ, Policy, KnowledgeItem,
+        Review, ProductCategory, or any custom type you propose in Task 2).
+
+        Task 2 — PROPOSE new entity types for content that doesn't fit the known types.
+        Examples of good proposals: SizeGuide, WarrantyPolicy, LoyaltyProgram,
+        DeliveryZone, ContactMethod, OrderStatus, PromotionPolicy, etc.
+        Only propose if you have evidence from this snippet.
+
+        Return ONLY valid JSON (no markdown fences):
+        {{
+            "items": [
+                {{
+                    "entity_type": "FAQ",
+                    "title": "Short question or heading",
+                    "content": "Full answer or policy text",
+                    "category": "returns_policy",
+                    "keywords": ["returns", "refund", "30 days"]
+                }},
+                {{
+                    "entity_type": "SizeGuide",
+                    "title": "Women's Dress Size Guide",
+                    "content": "UK 8 = EU 36 = US 4 ...",
+                    "category": "sizing",
+                    "keywords": ["size", "measurements"]
+                }}
+            ],
+            "ontology_proposals": [
+                {{
+                    "label": "SizeGuide",
+                    "description": "Brand size guide tables for product categories",
+                    "properties": ["brand_id", "category", "size_chart", "measurement_unit"],
+                    "relationships": [["Brand", "HAS_SIZE_GUIDE", "incoming"]],
+                    "evidence": "This page contains a women's clothing size guide"
+                }}
+            ]
+        }}
+
+        Return {{"items":[],"ontology_proposals":[]}} ONLY if this snippet
+        contains ZERO customer-support content (pure navigation, product listing,
+        bot-gate, or 404 redirect content).
+    """).strip()
+
+    try:
+        raw = await llm.generate(prompt, max_tokens=4096, fast=False)
+        m = re.search(r'\{[\s\S]+\}', raw)
+        if not m:
+            log.debug("chunk_no_json", url=url, raw_preview=raw[:120])
+            return [], []
+        data = json.loads(m.group(0))
+        return data.get("items", []), data.get("ontology_proposals", [])
+    except json.JSONDecodeError as e:
+        log.debug("chunk_json_error", url=url, error=str(e))
+        return [], []
+    except Exception as e:
+        log.warning("chunk_extract_failed", url=url, error=str(e))
+        return [], []
+
+
+async def _llm_extract(
+    llm,
+    url: str,
+    category: str,
+    content: str,
+    brand_id: str,
+    brand_name: str,
+    ontology_labels: str,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Extract structured knowledge from a page.
+
+    Large pages (e.g. 230K char Shopify FAQ) are split into keyword-anchored
+    chunks so the LLM always sees content near FAQ/policy sections rather than
+    a random 8K window from the middle.
+    """
+    # Use trafilatura to get clean body text (strips nav/boilerplate)
+    clean = _extract_clean_text(content)
+
+    if len(clean) < _MIN_CONTENT_LEN:
+        log.debug("extract_too_short", url=url, chars=len(clean))
+        return [], []
+
+    # Pre-check: skip pages with no help signals.
+    # Check BOTH the cleaned text AND a slice of the raw content — trafilatura
+    # can strip JS-rendered accordion answers, making the cleaned text look empty
+    # even when the underlying HTML contains full FAQ content.
+    raw_sample = re.sub(r'<[^>]+>', ' ', content[:40000])
+    raw_sample = re.sub(r'\s+', ' ', raw_sample)
+    if not _is_help_content(clean) and not _is_help_content(raw_sample):
+        log.info("extract_skipped_no_help_signals", url=url, chars=len(clean))
+        return [], []
+
+    # Split into targeted chunks
+    chunks = _find_content_chunks(clean, chunk_size=6000, max_chunks=5)
+    if not chunks:
+        log.info("extract_no_chunks", url=url)
+        return [], []
+
+    log.info("extract_chunks", url=url[:70], chunks=len(chunks), total_chars=len(clean))
+
+    # Process all chunks in parallel
+    tasks = [
+        _extract_chunk(llm, url, category, chunk, brand_id, brand_name, ontology_labels)
+        for chunk in chunks
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Merge and deduplicate by title
+    all_items: list[dict] = []
+    all_proposals: list[dict] = []
+    seen_titles: set[str] = set()
+
+    for res in results:
+        if isinstance(res, Exception):
+            log.warning("chunk_task_failed", url=url, error=str(res))
+            continue
+        items, proposals = res
+        for item in items:
+            title = item.get("title", "").strip().lower()
+            if title and title not in seen_titles:
+                seen_titles.add(title)
+                item["brand_id"] = brand_id
+                item["source_url"] = url
+                item["extracted_at"] = datetime.now(timezone.utc).isoformat()
+                all_items.append(item)
+        all_proposals.extend(proposals)
+
+    log.info("extract_done", url=url[:70], items=len(all_items), proposals=len(all_proposals))
+    return all_items, all_proposals
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NODE 1 — Orchestrator: find help-center entry points
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def node_orchestrate(state: AgentCollectState) -> dict[str, Any]:
+    """
+    AI-driven discovery of the brand's help-centre entry points.
+
+    Strategy order:
+    1. Fetch homepage HTML (browser-rendered, stealth)
+    2. DuckDuckGo + sitemap run in parallel
+    3. AI research agent: analyses homepage links + DDG results to identify
+       exactly which URLs are help/support/policy pages (not product pages)
+    4. LLM URL generation as last-resort fallback
+    """
+    base_url = state["base_url"]
+    domain = urlparse(base_url).netloc
+    llm = get_llm_client()
+    log.info("orchestrator_start", brand_id=state["brand_id"], base_url=base_url)
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(urls):
+        for u in urls:
+            clean = u.split("?")[0].rstrip("/")
+            if clean not in seen:
+                seen.add(clean)
+                candidates.append(u)
+
+    # ── Step 1: fetch homepage + sitemap + DDG in parallel ─────────────────
+    main_html_task = asyncio.create_task(_stealth_crawl(base_url, expand=False))
+
+    sitemap_task = asyncio.create_task(_collect_sitemap(base_url))
+    ddg_task = asyncio.create_task(_ddg_search(state["brand_name"], domain))
+
+    main_html, sitemap_urls, ddg = await asyncio.gather(
+        main_html_task, sitemap_task, ddg_task, return_exceptions=True
+    )
+    if isinstance(main_html, Exception): main_html = ""
+    if isinstance(sitemap_urls, Exception): sitemap_urls = []
+    if isinstance(ddg, Exception): ddg = []
+
+    log.info("discovery_raw", sitemap=len(sitemap_urls), ddg=len(ddg), html_chars=len(main_html))
+
+    # Add sitemap help URLs directly (already filtered by _is_help_link)
+    _add(sitemap_urls)
+    _add(ddg)
+
+    # ── Step 2: AI research agent ──────────────────────────────────────────
+    # Feed homepage HTML + DDG results to the LLM; it distinguishes help pages
+    # from product/category pages using reasoning, not just keyword matching.
+    if main_html:
+        ai_urls = await _ai_research_help_center(
+            llm, state["brand_name"], base_url, main_html, ddg
+        )
+        # AI-found URLs go to the FRONT — they're the most targeted
+        ai_urls_deduped = [u for u in ai_urls if u.split("?")[0].rstrip("/") not in seen]
+        candidates = ai_urls_deduped + candidates
+        for u in ai_urls_deduped:
+            seen.add(u.split("?")[0].rstrip("/"))
+        log.info("ai_research_added", count=len(ai_urls_deduped))
+
+    # ── Step 3: LLM URL generation if still sparse ─────────────────────────
+    if len(candidates) < 5:
+        llm_urls = await _llm_entry_points(llm, state["brand_name"], base_url, candidates)
+        log.info("llm_entry_points", count=len(llm_urls))
+        _add(llm_urls)
+
+    # Ensure the base URL is always reachable as a last resort
+    _add([base_url])
+
+    log.info(
+        "orchestrator_done",
+        brand_id=state["brand_id"],
+        entry_points=len(candidates),
+        top5=candidates[:5],
+    )
+    return {
+        "entry_points": candidates[: state["max_urls"]],
+        "phase": "collect",
+        "errors": [],
+    }
+
+
+async def _collect_sitemap(base_url: str) -> list[str]:
+    """Collect help-related URLs from sitemap (wrapper for async generator)."""
+    urls: list[str] = []
+    async for u in _sitemap_help_urls(base_url):
+        urls.append(u)
+        if len(urls) >= 50:
+            break
+    return urls
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NODE 2 — BFS collector: dynamically follows links, expands content
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def _crawl4ai_bfs(
+    entry_url: str,
+    domain: str,
+    max_pages: int,
+) -> list[tuple[str, str]]:
+    """
+    Use crawl4ai BFSDeepCrawlStrategy to crawl from entry_url.
+    Only follows links that actually exist in the DOM — no hallucinated paths.
+    Returns list of (url, content) pairs.
+    """
+    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+    from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
+
+    browser_cfg = BrowserConfig(
+        headless=True,
+        browser_type="chromium",
+        user_agent_mode="random",
+        enable_stealth=True,
+        extra_args=[
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--window-size=1920,1080",
+        ],
+        headers={
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,en-GB;q=0.8",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+        },
+    )
+
+    from crawl4ai.deep_crawling.filters import FilterChain, DomainFilter, URLPatternFilter
+
+    # Allow both bare domain and www variant (sites redirect between them)
+    domain_variants = [domain]
+    if domain.startswith("www."):
+        domain_variants.append(domain[4:])
+    else:
+        domain_variants.append(f"www.{domain}")
+
+    # Block product/cart/asset paths; only follow help/support content
+    block_patterns = [f"*{frag}*" for frag in _SKIP_PATH_FRAGMENTS]
+
+    strategy = BFSDeepCrawlStrategy(
+        max_depth=3,
+        max_pages=max_pages,
+        include_external=False,
+        filter_chain=FilterChain([
+            DomainFilter(allowed_domains=domain_variants),
+            URLPatternFilter(patterns=block_patterns, use_glob=True, reverse=True),
+        ]),
+    )
+
+    run_cfg = CrawlerRunConfig(
+        deep_crawl_strategy=strategy,
+        magic=True,
+        simulate_user=True,
+        override_navigator=True,
+        js_code=[_STEALTH_INIT_JS, _EXPAND_CONTENT_JS],
+        delay_before_return_html=2.5,
+        word_count_threshold=5,
+        page_timeout=45000,
+        remove_overlay_elements=True,
+    )
+
+    pages: list[tuple[str, str]] = []
+    async with AsyncWebCrawler(config=browser_cfg) as crawler:
+        results = await crawler.arun(url=entry_url, config=run_cfg)
+
+    # CrawlResultContainer (0.8.x) is iterable — iterate directly
+    for r in results:
+        url = getattr(r, 'url', entry_url)
+        content = getattr(r, 'html', None) or getattr(r, 'markdown', '') or ''
+        if not content or len(content.strip()) < _MIN_CONTENT_LEN:
+            continue
+        # Accept both bare domain and www variant
+        netloc = urlparse(url).netloc
+        if netloc not in domain_variants:
+            continue
+        if any(skip in url.lower() for skip in _SKIP_PATH_FRAGMENTS):
+            continue
+        pages.append((url, content))
+
+    log.info("bfs_deep_results", entry=entry_url, total_crawled=len(list(results)) if hasattr(results, '__len__') else '?', kept=len(pages))
+    return pages
+
+
+async def node_collect(state: AgentCollectState) -> dict[str, Any]:
+    """
+    Collect pages from entry points.
+
+    Primary:  crawl4ai BFSDeepCrawlStrategy — browser renders each page,
+              extracts links from the real DOM, and follows them level by level.
+              This ensures we only visit URLs that actually exist on the site.
+
+    Fallback: manual BFS with fetch waterfall (stealth → cache → wayback → httpx).
+    """
+    entry_points = state["entry_points"]
+    if not entry_points:
+        log.warning("collect_no_entry_points", brand_id=state["brand_id"])
+        return {
+            "extracted_items": [],
+            "ontology_proposals": [],
+            "phase": "synthesize",
+            "errors": state["errors"],
+        }
+
+    domain = urlparse(state["base_url"]).netloc
+    llm = get_llm_client()
+    brand_id = state["brand_id"]
+    brand_name = state["brand_name"]
+    max_pages = state["max_urls"]
+
+    ontology_labels = "FAQ, Policy, KnowledgeItem, Review, ProductCategory"
+    try:
+        from core.ontology.dynamic import get_ontology_manager
+        ontology_labels = get_ontology_manager().get_type_labels_for_prompt()
+    except Exception:
+        pass
+
+    all_items: list[dict] = []
+    all_proposals: list[dict] = []
+    errors = list(state["errors"])
+    crawled_pages: list[tuple[str, str]] = []
+
+    domain_variants = {domain}
+    if domain.startswith("www."):
+        domain_variants.add(domain[4:])
+    else:
+        domain_variants.add(f"www.{domain}")
+
+    # ── Strategy 1: crawl4ai BFSDeepCrawlStrategy ─────────────────────────
+    # Start from the help-keyword entry point identified by the AI research agent.
+    help_entry = next((u for u in entry_points if _is_help_link(u)), None)
+    start_url = help_entry or entry_points[0]
+    log.info("bfs_deep_start", brand_id=brand_id, start_url=start_url, max_pages=max_pages)
+    try:
+        crawled_pages = await _crawl4ai_bfs(start_url, domain, max_pages)
+        log.info("bfs_deep_done", brand_id=brand_id, pages=len(crawled_pages))
+    except Exception as e:
+        log.warning("bfs_deep_failed", brand_id=brand_id, error=str(e))
+        crawled_pages = []
+
+    # ── Strategy 2: manual BFS — always runs on remaining uncovered entries ──
+    # Deep BFS covers the best entry point depth-3; manual BFS covers the rest.
+    # Also acts as primary when deep BFS fails or returns < 5 pages.
+    already_visited = {u.split("?")[0].rstrip("/") for u, _ in crawled_pages}
+    remaining_entries = [
+        u for u in entry_points
+        if u.split("?")[0].rstrip("/") not in already_visited
+        and _is_help_link(u)  # only visit help-keyword URLs in manual mode
+    ]
+    if remaining_entries or len(crawled_pages) < 5:
+        queue_seed = remaining_entries if crawled_pages else list(entry_points)
+        log.info("bfs_manual_start", brand_id=brand_id, queue=len(queue_seed))
+        visited: set[str] = set(already_visited)
+        queue: list[str] = queue_seed
+
+        while queue and len(visited) < max_pages:
+            batch: list[str] = []
+            while queue and len(batch) < _BFS_BATCH:
+                url = queue.pop(0)
+                norm = url.split("?")[0].rstrip("/")
+                if norm not in visited:
+                    visited.add(norm)
+                    batch.append(url)
+            if not batch:
+                break
+
+            log.info("bfs_round", batch=len(batch), visited=len(visited), queued=len(queue))
+            fetch_tasks = [_fetch_any(u, expand=True) for u in batch]
+            fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+            for url, content in zip(batch, fetch_results):
+                if isinstance(content, Exception) or not content:
+                    continue
+                if len(content.strip()) >= _MIN_CONTENT_LEN:
+                    crawled_pages.append((url, content))
+                    for link in _extract_links(content, f"https://{domain}"):
+                        if _is_help_link(link):
+                            norm = link.split("?")[0].rstrip("/")
+                            if norm not in visited:
+                                queue.append(link)
+
+            await asyncio.sleep(0.5 + random.random() * 0.5)
+
+        log.info("bfs_manual_done", brand_id=brand_id, pages=len(crawled_pages))
+
+    # ── Extract knowledge from all collected pages ─────────────────────────
+    log.info("extract_start", brand_id=brand_id, pages=len(crawled_pages))
+    extract_tasks = [
+        _llm_extract(llm, url, _guess_category(url), content, brand_id, brand_name, ontology_labels)
+        for url, content in crawled_pages
+    ]
+    extract_results = await asyncio.gather(*extract_tasks, return_exceptions=True)
+
+    for result in extract_results:
+        if isinstance(result, Exception):
+            errors.append(str(result))
+            continue
+        items, proposals = result
+        all_items.extend(items)
+        all_proposals.extend(proposals)
+
+    log.info(
+        "collect_done",
+        brand_id=brand_id,
+        pages=len(crawled_pages),
+        items=len(all_items),
+        proposals=len(all_proposals),
+        errors=len(errors),
+    )
+    return {
+        "extracted_items": all_items,
+        "ontology_proposals": all_proposals,
+        "phase": "synthesize",
+        "errors": errors,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NODE 3 — Synthesis: write to FalkorDB + pgvector, apply ontology
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _write_graph(items: list[dict], brand_id: str) -> int:
+    written = 0
+    try:
+        from core.ontology.schema import get_graph_client
+        _, graph = get_graph_client()
+        for item in items:
+            et = item.get("entity_type", "KnowledgeItem")
+            title = str(item.get("title", ""))[:200].replace("'", "")
+            content = str(item.get("content", ""))[:2000].replace("'", "")
+            cat = str(item.get("category", "general")).replace("'", "")
+            src = str(item.get("source_url", "")).replace("'", "")
+            kw = json.dumps(item.get("keywords", [])).replace("'", "")
+            nid = f"{brand_id}_{uuid.uuid4().hex[:8]}"
+            if et == "FAQ":
+                graph.query(
+                    f"MERGE (n:FAQ {{id:'{nid}'}}) "
+                    f"SET n.question='{title}',n.answer='{content}',"
+                    f"    n.category='{cat}',n.keywords='{kw}',"
+                    f"    n.brand_id='{brand_id}',n.source_url='{src}' "
+                    f"WITH n MATCH (b:Brand {{id:'{brand_id}'}}) MERGE (b)-[:HAS_FAQ]->(n)"
+                )
+            elif et in ("Policy", "returns_policy", "shipping_policy"):
+                pt = cat if cat in ("returns", "shipping", "privacy") else "general"
+                graph.query(
+                    f"MERGE (n:Policy {{id:'{nid}'}}) "
+                    f"SET n.policy_type='{pt}',n.title='{title}',"
+                    f"    n.content='{content}',n.brand_id='{brand_id}',n.source_url='{src}' "
+                    f"WITH n MATCH (b:Brand {{id:'{brand_id}'}}) MERGE (b)-[:HAS_POLICY {{type:'{pt}'}}]->(n)"
+                )
+            else:
+                ext = item.get("extracted_at", datetime.now(timezone.utc).isoformat())
+                graph.query(
+                    f"MERGE (n:KnowledgeItem {{id:'{nid}'}}) "
+                    f"SET n.entity_type='{et}',n.title='{title}',"
+                    f"    n.content='{content}',n.category='{cat}',"
+                    f"    n.brand_id='{brand_id}',n.source_url='{src}',n.extracted_at='{ext}' "
+                    f"WITH n MATCH (b:Brand {{id:'{brand_id}'}}) MERGE (b)-[:HAS_KNOWLEDGE]->(n)"
+                )
+            written += 1
+    except Exception as e:
+        log.error("graph_write_failed", brand_id=brand_id, error=str(e))
+    return written
+
+
+async def _write_pgvector(items: list[dict], brand_id: str) -> int:
+    written = 0
+    if not settings.postgres_host:
+        return 0
+    try:
+        import psycopg
+        conn_str = (
+            f"host={settings.postgres_host} port={settings.postgres_port} "
+            f"dbname={settings.postgres_db} user={settings.postgres_user} "
+            f"password={settings.postgres_password}"
+        )
+        async with await psycopg.AsyncConnection.connect(conn_str) as conn:
+            await conn.execute(
+                "CREATE TABLE IF NOT EXISTS knowledge_chunks ("
+                "id uuid PRIMARY KEY DEFAULT gen_random_uuid(),"
+                "brand_id text NOT NULL, chunk_type text, content text,"
+                "metadata jsonb, created_at timestamptz DEFAULT now())"
+            )
+            for item in items:
+                body = str(item.get("content", "")).strip()
+                if not body:
+                    continue
+                await conn.execute(
+                    "INSERT INTO knowledge_chunks (brand_id,chunk_type,content,metadata) VALUES (%s,%s,%s,%s)",
+                    (
+                        brand_id,
+                        item.get("entity_type", "KnowledgeItem"),
+                        body[:4000],
+                        json.dumps({
+                            "title": item.get("title", ""),
+                            "category": item.get("category", ""),
+                            "source_url": item.get("source_url", ""),
+                            "keywords": item.get("keywords", []),
+                        }),
+                    ),
+                )
+                written += 1
+            await conn.commit()
+    except Exception as e:
+        log.warning("pgvector_failed", brand_id=brand_id, error=str(e))
+    return written
+
+
+async def _apply_proposals(proposals: list[dict], brand_id: str) -> int:
+    applied = 0
+    if not proposals:
+        return 0
+    try:
+        from core.ontology.dynamic import get_ontology_manager
+        om = get_ontology_manager()
+        seen: set[str] = set()
+        for p in proposals:
+            label = p.get("label", "").strip()
+            if not label or label in seen:
+                continue
+            seen.add(label)
+            pid = om.propose_entity_type(
+                label=label,
+                description=p.get("description", ""),
+                properties=p.get("properties", []),
+                relationships=p.get("relationships", []),
+                brand_id=brand_id,
+                proposed_by="sub_agent",
+                evidence=p.get("evidence", ""),
+                auto_apply=True,
+            )
+            if pid != "exists":
+                applied += 1
+    except Exception as e:
+        log.warning("ontology_failed", error=str(e))
+    return applied
+
+
+async def node_synthesize(state: AgentCollectState) -> dict[str, Any]:
+    items = state["extracted_items"]
+    proposals = state["ontology_proposals"]
+    brand_id = state["brand_id"]
+    log.info("synthesis_start", brand_id=brand_id, items=len(items))
+
+    ontology_applied = await _apply_proposals(proposals, brand_id)
+    graph_n, pg_n = await asyncio.gather(
+        _write_graph(items, brand_id),
+        _write_pgvector(items, brand_id),
+        return_exceptions=True,
+    )
+    if isinstance(graph_n, Exception):
+        log.error("graph_err", e=str(graph_n)); graph_n = 0
+    if isinstance(pg_n, Exception):
+        log.warning("pg_err", e=str(pg_n)); pg_n = 0
+
+    log.info(
+        "synthesis_done",
+        brand_id=brand_id,
+        graph=graph_n,
+        pg=pg_n,
+        ontology=ontology_applied,
+    )
+    return {"phase": "done", "extracted_count": int(graph_n)}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GRAPH CONSTRUCTION + PUBLIC API
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _build_graph() -> StateGraph:
+    b = StateGraph(AgentCollectState)
+    b.add_node("orchestrate", node_orchestrate)
+    b.add_node("collect", node_collect)
+    b.add_node("synthesize", node_synthesize)
+    b.add_edge(START, "orchestrate")
+    b.add_edge("orchestrate", "collect")
+    b.add_edge("collect", "synthesize")
+    b.add_edge("synthesize", END)
+    return b.compile()
+
+
+_graph = None
+
+
+def _get_graph():
+    global _graph
+    if _graph is None:
+        _graph = _build_graph()
+    return _graph
+
+
+async def run_agent_collection(
+    brand_id: str,
+    brand_name: str,
+    base_url: str,
+    max_urls: int = _MAX_URLS_DEFAULT,
+) -> dict[str, Any]:
+    if not base_url.startswith(("http://", "https://")):
+        base_url = f"https://{base_url}"
+    base_url = base_url.rstrip("/")
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    initial: AgentCollectState = {
+        "brand_id": brand_id,
+        "brand_name": brand_name,
+        "base_url": base_url,
+        "max_urls": max_urls,
+        "entry_points": [],
+        "extracted_items": [],
+        "ontology_proposals": [],
+        "phase": "discover",
+        "errors": [],
+        "extracted_count": 0,
+        "started_at": started_at,
+    }
+
+    log.info("collection_start", brand_id=brand_id, base_url=base_url)
+    t0 = time.monotonic()
+    final = await _get_graph().ainvoke(initial)
+    elapsed = round(time.monotonic() - t0, 1)
+
+    log.info(
+        "collection_complete",
+        brand_id=brand_id,
+        extracted=final.get("extracted_count", 0),
+        pages=len(final.get("entry_points", [])),
+        elapsed_s=elapsed,
+    )
+    return {
+        "brand_id": brand_id,
+        "brand_name": brand_name,
+        "base_url": base_url,
+        "phase": final.get("phase", "done"),
+        "extracted_count": final.get("extracted_count", 0),
+        "pages_visited": len(final.get("entry_points", [])),
+        "ontology_proposals": len(final.get("ontology_proposals", [])),
+        "errors": final.get("errors", []),
+        "elapsed_s": elapsed,
+        "started_at": started_at,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def get_collection_status(brand_id: str) -> dict[str, Any] | None:
+    try:
+        from core.memory.session import get_redis
+        r = get_redis()
+        raw = await r.get(f"agent_collect:{brand_id}")
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+async def _save_status(brand_id: str, status: dict[str, Any]) -> None:
+    try:
+        from core.memory.session import get_redis
+        r = get_redis()
+        await r.setex(f"agent_collect:{brand_id}", 86400, json.dumps(status))
+    except Exception:
+        pass

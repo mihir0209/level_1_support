@@ -556,28 +556,73 @@ async def ontology_overview():
         raise HTTPException(status_code=503, detail=str(e))
 
 
+@admin_router.get("/ontology/types", tags=["Ontology"])
+async def ontology_list_types():
+    """All active entity types (built-in + dynamically proposed and applied)."""
+    from core.ontology.dynamic import get_ontology_manager
+    om = get_ontology_manager()
+    return {"types": om.get_entity_types(include_builtin=True)}
+
+
+@admin_router.get("/ontology/proposals", tags=["Ontology"])
+async def ontology_list_proposals(status: str | None = None):
+    """
+    Ontology proposals raised by agents during collection.
+
+    - `status=pending` — awaiting human approval
+    - `status=active`  — already applied (auto or manual)
+    - omit `status`    — return all
+    """
+    from core.ontology.dynamic import get_ontology_manager
+    om = get_ontology_manager()
+    return {"proposals": om.get_proposals(status=status)}
+
+
+@admin_router.post("/ontology/proposals/{proposal_id}/apply", tags=["Ontology"])
+async def ontology_apply_proposal(proposal_id: str):
+    """Manually approve and activate a pending ontology proposal."""
+    from core.ontology.dynamic import get_ontology_manager
+    om = get_ontology_manager()
+    ok = om.apply_proposal(proposal_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"Proposal '{proposal_id}' not found or already active")
+    return {"applied": True, "proposal_id": proposal_id}
+
+
 @admin_router.get("/ontology/brand/{brand_id}", tags=["Graph"])
 async def ontology_brand(brand_id: str):
-    """Brand subtree — policies, issue types, and sample FAQs for a given brand_id."""
+    """
+    Brand knowledge subtree — policies, issue types, FAQs, and knowledge items.
+
+    Note: Brand nodes are keyed by `id` property (not `brand_id`).
+    Also queries directly by brand_id property on child nodes as fallback.
+    """
     try:
         _, graph = get_graph_client()
+
+        # Policies — via Brand node (id=brand_id) or direct brand_id property
         policies = graph.query(
-            f"MATCH (b:Brand {{brand_id: '{brand_id}'}})-[:HAS_POLICY]->(p) "
-            f"RETURN p.policy_type as type, p.title as title, keys(p) as fields"
+            f"MATCH (p:Policy) WHERE p.brand_id = '{brand_id}' "
+            f"RETURN p.policy_type as type, p.title as title LIMIT 20"
         )
         issues = graph.query(
-            f"MATCH (b:Brand {{brand_id: '{brand_id}'}})-[:HAS_ISSUE_TYPE]->(it) "
+            f"MATCH (b:Brand {{id: '{brand_id}'}})-[:HAS_ISSUE_TYPE]->(it) "
             f"RETURN it.issue_type_id as issue, it.category as category"
         )
         faqs = graph.query(
-            f"MATCH (b:Brand {{brand_id: '{brand_id}'}})-[:HAS_FAQ]->(f) "
-            f"RETURN f.question as question, f.category as category LIMIT 5"
+            f"MATCH (f:FAQ) WHERE f.brand_id = '{brand_id}' "
+            f"RETURN f.question as question, f.category as category LIMIT 10"
+        )
+        knowledge = graph.query(
+            f"MATCH (k:KnowledgeItem) WHERE k.brand_id = '{brand_id}' "
+            f"RETURN k.title as title, k.entity_type as type, k.category as category LIMIT 10"
         )
         return {
             "brand_id": brand_id,
-            "policies": [dict(zip(["type", "title", "fields"], r)) for r in policies.result_set],
+            "policies": [dict(zip(["type", "title"], r)) for r in policies.result_set],
             "issue_types": [dict(zip(["issue", "category"], r)) for r in issues.result_set],
             "sample_faqs": [dict(zip(["question", "category"], r)) for r in faqs.result_set],
+            "knowledge_items": [dict(zip(["title", "type", "category"], r)) for r in knowledge.result_set],
         }
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
@@ -622,27 +667,33 @@ async def kb_policies(brand_id: str | None = None):
 @admin_router.get("/kb/pgvector/chunks", tags=["Knowledge Base"])
 async def kb_chunks(brand_id: str | None = None, chunk_type: str | None = None, limit: int = 20):
     """Semantic-search chunks from Postgres pgvector — the base for vector retrieval."""
-    import psycopg2
-    conn = psycopg2.connect(
-        host=settings.postgres_host,
-        port=settings.postgres_port,
-        dbname=settings.postgres_db,
-        user=settings.postgres_user,
-        password=settings.postgres_password,
-    )
+    if not settings.postgres_host:
+        return {"count": 0, "chunks": [], "note": "Postgres not configured"}
     try:
-        cur = conn.cursor()
-        query = "SELECT id, brand_id, chunk_type, left(content, 200) as content_preview, metadata FROM knowledge_chunks WHERE 1=1"
-        if brand_id:
-            query += f" AND brand_id = '{brand_id}'"
-        if chunk_type:
-            query += f" AND chunk_type = '{chunk_type}'"
-        query += f" LIMIT {limit}"
-        cur.execute(query)
-        rows = cur.fetchall()
-        return {"count": len(rows), "chunks": [{"id": str(r[0]), "brand_id": r[1], "chunk_type": r[2], "preview": r[3], "metadata": r[4]} for r in rows]}
-    finally:
-        conn.close()
+        import psycopg
+        conn_str = (
+            f"host={settings.postgres_host} port={settings.postgres_port} "
+            f"dbname={settings.postgres_db} user={settings.postgres_user} "
+            f"password={settings.postgres_password}"
+        )
+        async with await psycopg.AsyncConnection.connect(conn_str) as conn:
+            params: list = []
+            q = "SELECT id, brand_id, chunk_type, left(content,200), metadata FROM knowledge_chunks WHERE 1=1"
+            if brand_id:
+                q += " AND brand_id = %s"
+                params.append(brand_id)
+            if chunk_type:
+                q += " AND chunk_type = %s"
+                params.append(chunk_type)
+            q += " ORDER BY created_at DESC LIMIT %s"
+            params.append(limit)
+            rows = await (await conn.execute(q, params)).fetchall()
+            return {
+                "count": len(rows),
+                "chunks": [{"id": str(r[0]), "brand_id": r[1], "chunk_type": r[2], "preview": r[3], "metadata": r[4]} for r in rows],
+            }
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 # ── Brand endpoints ───────────────────────────────────────────────────────────
@@ -850,20 +901,16 @@ class CollectRequest(BaseModel):
 @admin_router.post("/brands/{brand_id}/collect", tags=["Brands"])
 async def trigger_brand_collection(brand_id: str, req: CollectRequest = CollectRequest()):
     """
-    Trigger automated internet data collection for a registered brand.
+    Trigger agent-driven data collection for a registered brand.
 
-    **What it does:**
-    1. Crawls the brand's own support pages (returns, FAQs, policies, about)
-    2. Searches the web for news, reviews, social mentions about the brand
-       (uses Exa API if `EXA_API_KEY` is set; falls back to DuckDuckGo)
-    3. Extracts structured data from every page using crawl4ai + LLM
-    4. Writes FAQs, policies, reviews, mentions to FalkorDB knowledge graph
-    5. Writes searchable text chunks to Postgres pgvector
-
-    **Deduplication:** URLs are hashed (SHA-256) in Redis — already-seen pages are skipped.
-
-    **Resume:** If `resume=true` (default), a failed/interrupted run continues from where it left off.
-    Set `resume=false` to start completely fresh.
+    **Pipeline (3 nodes):**
+    1. **Orchestrate** — discovers real help-centre URLs via sitemap, DuckDuckGo,
+       and stealth browser crawl of the brand's homepage.
+    2. **Collect** — crawl4ai BFSDeepCrawlStrategy follows only links actually found
+       in the DOM (no hallucinated paths). Falls back to manual BFS with stealth
+       browser → Google Cache → Wayback Machine waterfall.
+    3. **Synthesize** — writes FAQs/policies/knowledge items to FalkorDB and
+       pgvector; applies any ontology proposals raised during extraction.
 
     Check progress with `GET /admin/brands/{brand_id}/collect/status`.
     """
@@ -872,21 +919,20 @@ async def trigger_brand_collection(brand_id: str, req: CollectRequest = CollectR
     if not entry:
         raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not found. Register it first via POST /admin/brands.")
 
-    base_domain = entry.domains[0] if entry.domains else brand_id
+    base_url = f"https://{entry.domains[0]}" if entry.domains else f"https://{brand_id}.com"
 
     async def _run_in_background():
-        from ingestion.brand_collector import collect_brand_data
+        from ingestion.agent_collector import run_agent_collection, _save_status
         try:
-            await collect_brand_data(
+            result = await run_agent_collection(
                 brand_id=brand_id,
                 brand_name=entry.name,
-                base_domain=base_domain,
-                resume=req.resume,
+                base_url=base_url,
                 max_urls=req.max_urls,
-                concurrency=req.concurrency,
             )
+            await _save_status(brand_id, result)
         except Exception as e:
-            log.error("brand_collection_failed", brand_id=brand_id, error=str(e))
+            log.error("agent_collection_failed", brand_id=brand_id, error=str(e))
 
     asyncio.create_task(_run_in_background())
 
@@ -894,10 +940,9 @@ async def trigger_brand_collection(brand_id: str, req: CollectRequest = CollectR
         "status": "started",
         "brand_id": brand_id,
         "brand_name": entry.name,
-        "base_domain": base_domain,
-        "resume": req.resume,
+        "base_url": base_url,
         "max_urls": req.max_urls,
-        "message": f"Collection running in background. Poll GET /admin/brands/{brand_id}/collect/status for progress.",
+        "message": f"Agent collection running in background. Poll GET /admin/brands/{brand_id}/collect/status for progress.",
     }
 
 
@@ -906,10 +951,10 @@ async def brand_collection_status(brand_id: str):
     """
     Check the current data collection status for a brand.
 
-    Returns phase (seed → discover → fetch → done), URL counts, and timestamp.
+    Returns phase, extracted_count, pages_visited, ontology_proposals, errors.
     Returns 404 if no collection has been started for this brand.
     """
-    from ingestion.brand_collector import get_collection_status
+    from ingestion.agent_collector import get_collection_status
     status = await get_collection_status(brand_id)
     if not status:
         raise HTTPException(
