@@ -462,9 +462,12 @@ async def _ddg_search(brand_name: str, domain: str) -> list[str]:
     query = f'site:{domain_base} help OR faq OR "returns policy" OR "customer service"'
     found: list[str] = []
 
-    # Primary: duckduckgo-search library
+    # Primary: ddgs library (formerly duckduckgo-search)
     try:
-        from duckduckgo_search import DDGS
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
         results = await asyncio.get_event_loop().run_in_executor(
             None,
             lambda: list(DDGS().text(query, max_results=25))

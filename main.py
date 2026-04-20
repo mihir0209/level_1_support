@@ -15,10 +15,18 @@ Chatwoot webhook integration:
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 import uuid
+import warnings
 from contextlib import asynccontextmanager
 from typing import Any
+
+# Silence litellm/pydantic serializer noise caused by Azure OpenAI response
+# shapes not matching litellm's internal Pydantic model field counts exactly.
+warnings.filterwarnings("ignore", message="Pydantic serializer warnings", category=UserWarning)
+# Silence the duckduckgo-search → ddgs rename warning (handled in agent_collector)
+warnings.filterwarnings("ignore", message=".*renamed to.*ddgs.*", category=RuntimeWarning)
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request
@@ -33,7 +41,7 @@ from starlette.responses import PlainTextResponse
 from brands.registry import resolve_brand, BRAND_REGISTRY
 from config import settings
 from core.memory.session import create_session, get_session, update_session
-from core.ontology.models import Channel, Customer, Order, OrderStatus, Shipment
+from core.ontology.models import Channel, Customer, CustomerTier, Order, OrderItem, OrderStatus, Shipment
 from core.orchestration.graph import get_graph
 from core.orchestration.state import L1SupportState
 from core.ontology.schema import create_schema, verify_connectivity
@@ -232,9 +240,188 @@ _MOCK_CUSTOMERS: dict[str, Customer] = {
 }
 
 
+# ── Dynamic demo data store (populated per-brand via POST /admin/brands/{id}/demo-data) ──
+_DEMO_DATA: dict[str, dict] = {}
+
+
+def _generate_brand_demo_data(brand_id: str, brand_name: str) -> dict:
+    """Generate realistic mock customers / orders / returns / promos for a brand."""
+    now = datetime.now(timezone.utc)
+    prefix = brand_id[:3].upper()
+    currency = "USD" if any(x in brand_id for x in ["us", "usa"]) else "GBP"
+    carriers = ["Evri", "Royal Mail", "DPD", "Yodel", "DHL"]
+    carrier = random.choice(carriers)
+
+    def _order(cid, suffix, status, days_ago, value, items, *, days_ahead=2):
+        o = Order(
+            id=f"{prefix}-{suffix}", brand_id=brand_id, customer_id=cid,
+            status=status, placed_at=now - timedelta(days=days_ago),
+            total_value=value, currency=currency, items=items,
+        )
+        if status in (OrderStatus.IN_TRANSIT, OrderStatus.DISPATCHED):
+            o.shipment = Shipment(
+                tracking_id=f"{carrier.upper()[:4]}-{random.randint(100000000, 999999999)}",
+                carrier=carrier,
+                estimated_delivery=now + timedelta(days=days_ahead),
+                current_status="Out for delivery" if days_ahead <= 1 else "In transit",
+                tracking_url=f"https://www.{carrier.lower().replace(' ', '')}.com/track",
+            )
+        return o
+
+    def _items(*args):  # (sku, name, qty, price, size, color)
+        return [OrderItem(sku=a[0], name=a[1], quantity=a[2], price_paid=a[3], size=a[4], color=a[5]) for a in args]
+
+    # ── 6 customers ────────────────────────────────────────────────────────
+    customers: dict[str, Customer] = {}
+
+    # 1. Standard — order in transit
+    c1 = f"{brand_id}_cust_001"
+    customers[c1] = Customer(
+        id=c1, brand_id=brand_id, email="emma.jones@example.com",
+        tier=CustomerTier.STANDARD, locale="en-GB", total_orders=3,
+        recent_orders=[
+            _order(c1, "48291", OrderStatus.IN_TRANSIT, 3, 67.99,
+                   _items(("TOP-RIB-BLK-12","Ribbed Knit Top",1,22.99,"12","Black"),
+                          ("JNS-HW-BLU-10","High Waist Straight Jeans",1,45.00,"10","Blue"))),
+            _order(c1, "41204", OrderStatus.DELIVERED, 18, 34.50,
+                   _items(("DRS-FLR-GRN-08","Floral Midi Dress",1,34.50,"8","Green"))),
+        ],
+    )
+
+    # 2. Standard — processing (just placed)
+    c2 = f"{brand_id}_cust_002"
+    customers[c2] = Customer(
+        id=c2, brand_id=brand_id, email="priya.sharma@example.com",
+        tier=CustomerTier.STANDARD, locale="en-GB", total_orders=1,
+        recent_orders=[
+            _order(c2, "52017", OrderStatus.PROCESSING, 0, 89.00,
+                   _items(("CTN-STS-WHT-10","Cotton Striped Set",1,55.00,"10","White"),
+                          ("SNK-WHT-06","White Trainers",1,34.00,"6",None))),
+        ],
+    )
+
+    # 3. Loyalty — return pending
+    c3 = f"{brand_id}_cust_003"
+    customers[c3] = Customer(
+        id=c3, brand_id=brand_id, email="sophie.williams@example.com",
+        tier=CustomerTier.LOYALTY, locale="en-GB", total_orders=9,
+        recent_orders=[
+            _order(c3, "39854", OrderStatus.RETURN_PENDING, 8, 58.00,
+                   _items(("BLZ-OVR-CRM-12","Oversized Blazer",1,58.00,"12","Cream"))),
+            _order(c3, "37201", OrderStatus.DELIVERED, 25, 112.50,
+                   _items(("SUIT-PWR-NVY-10","Power Suit Set",1,112.50,"10","Navy"))),
+        ],
+        open_returns=[{
+            "return_id": f"RET-{prefix}-39854",
+            "order_id": f"{prefix}-39854",
+            "item": "Oversized Blazer",
+            "reason": "Too large — ordered wrong size",
+            "status": "awaiting_drop_off",
+            "return_label_url": f"https://returns.{brand_name.lower().replace(' ', '')}.com/RET-{prefix}-39854",
+            "refund_amount": 58.00,
+            "currency": currency,
+        }],
+    )
+
+    # 4. Loyalty — delivered, recently
+    c4 = f"{brand_id}_cust_004"
+    customers[c4] = Customer(
+        id=c4, brand_id=brand_id, email="chloe.thomas@example.com",
+        tier=CustomerTier.LOYALTY, locale="en-GB", total_orders=7,
+        recent_orders=[
+            _order(c4, "50932", OrderStatus.DELIVERED, 5, 145.00,
+                   _items(("COAT-WLK-BEG-14","Wool Blend Walker Coat",1,145.00,"14","Beige"))),
+        ],
+    )
+
+    # 5. VIP — multiple orders, one faulty item return
+    c5 = f"{brand_id}_cust_005"
+    customers[c5] = Customer(
+        id=c5, brand_id=brand_id, email="victoria.reed@example.com",
+        tier=CustomerTier.VIP, locale="en-GB", total_orders=24,
+        recent_orders=[
+            _order(c5, "53109", OrderStatus.IN_TRANSIT, 1, 220.00, days_ahead=1,
+                   items=_items(("DRSS-SLK-MID-12","Satin Midi Slip Dress",1,89.00,"12","Champagne"),
+                                ("HLS-STL-BLK-8","Stiletto Heels",1,65.00,"8","Black"),
+                                ("BAG-CLS-BRN","Structured Tote",1,66.00,None,"Brown"))),
+            _order(c5, "49801", OrderStatus.RETURN_PENDING, 6, 54.00,
+                   _items(("TOP-KNIT-FLW-10","Floral Print Knit Top",1,54.00,"10","Multi"))),
+        ],
+        open_returns=[{
+            "return_id": f"RET-{prefix}-49801",
+            "order_id": f"{prefix}-49801",
+            "item": "Floral Print Knit Top",
+            "reason": "Faulty — seam split after first wash",
+            "status": "received_at_warehouse",
+            "refund_amount": 54.00,
+            "currency": currency,
+            "faulty": True,
+            "refund_eta_days": 3,
+        }],
+    )
+
+    # 6. Standard — cancelled order
+    c6 = f"{brand_id}_cust_006"
+    customers[c6] = Customer(
+        id=c6, brand_id=brand_id, email="mia.baker@example.com",
+        tier=CustomerTier.STANDARD, locale="en-GB", total_orders=2,
+        recent_orders=[
+            _order(c6, "47633", OrderStatus.CANCELLED, 2, 29.99,
+                   _items(("LGNG-RBD-BLK-S","Ribbed Leggings",1,29.99,"S","Black"))),
+        ],
+    )
+
+    # ── Promo codes ────────────────────────────────────────────────────────
+    promos = [
+        {"code": f"{prefix}20NOW", "discount": "20% off full price items", "min_spend": 40.0,
+         "expires": (now + timedelta(days=14)).isoformat(), "stackable": False},
+        {"code": f"LOYALTY{prefix}", "discount": "Free standard delivery", "min_spend": 0.0,
+         "expires": (now + timedelta(days=90)).isoformat(), "stackable": True,
+         "tier_required": "loyalty"},
+        {"code": "WELCOME10", "discount": "10% off first order", "min_spend": 25.0,
+         "expires": (now + timedelta(days=365)).isoformat(), "stackable": False},
+    ]
+
+    # ── Mock integration tools ─────────────────────────────────────────────
+    tools = {
+        "order_tracking": {
+            "description": "Look up live order status by order ID",
+            "endpoint": f"https://api.{brand_name.lower().replace(' ', '')}.com/orders/{{order_id}}",
+            "auth": "X-API-KEY",
+        },
+        "returns_portal": {
+            "description": "Initiate or check a return request",
+            "endpoint": f"https://returns.{brand_name.lower().replace(' ', '')}.com/api/{{order_id}}",
+            "auth": "X-API-KEY",
+        },
+        "size_guide": {
+            "description": "Size conversion tables for clothing categories",
+            "endpoint": f"https://www.{brand_name.lower().replace(' ', '')}.com/size-guide",
+            "auth": None,
+        },
+        "promo_validator": {
+            "description": "Validate and apply a promotional code",
+            "endpoint": f"https://api.{brand_name.lower().replace(' ', '')}.com/promos/validate",
+            "auth": "X-API-KEY",
+        },
+    }
+
+    return {
+        "brand_id": brand_id,
+        "brand_name": brand_name,
+        "customers": customers,
+        "promos": promos,
+        "tools": tools,
+        "generated_at": now.isoformat(),
+    }
+
+
 def get_mock_customer(customer_id: str | None, brand_id: str) -> Customer | None:
     if not customer_id:
         return None
+    # Check dynamic demo store first (populated by POST /admin/brands/{id}/demo-data)
+    if brand_id in _DEMO_DATA:
+        return _DEMO_DATA[brand_id]["customers"].get(customer_id)
     return _MOCK_CUSTOMERS.get(customer_id)
 
 
@@ -790,6 +977,58 @@ async def get_brand_detail(brand_id: str):
         "locales": entry.locales,
         "default_region": entry.default_region,
         "chatwoot_inbox_id": entry.chatwoot_inbox_id,
+    }
+
+
+@admin_router.post("/brands/{brand_id}/demo-data", tags=["Operations"])
+async def seed_brand_demo_data(brand_id: str):
+    """
+    Seed realistic mock demo data for a brand — simulates the customer/order
+    data that the brand's own backend systems would provide in production.
+
+    Generates and stores in-memory:
+    - **6 customers** spanning Standard / Loyalty / VIP tiers
+    - **Multiple orders per customer** with statuses: PROCESSING, IN_TRANSIT,
+      DELIVERED, RETURN_PENDING, CANCELLED
+    - **Shipment tracking** info for dispatched/in-transit orders
+    - **Open returns** (size issue, faulty item) with return labels
+    - **3 promo codes** (percentage discount, free delivery, welcome offer)
+    - **Mock integration tools** (order tracking API, returns portal, size guide,
+      promo validator) — these are the endpoints the support agent would call
+      at runtime
+
+    After seeding, use the `customer_id` values returned here in `POST /chat`
+    requests to get context-aware responses. E.g. a customer with a
+    RETURN_PENDING order asking "where is my return?" will get a specific reply.
+
+    Re-calling this endpoint regenerates the data (new tracking IDs, fresh timestamps).
+    """
+    from brands.registry import get_brand_by_id
+    entry = get_brand_by_id(brand_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not found.")
+
+    data = _generate_brand_demo_data(brand_id, entry.name)
+    _DEMO_DATA[brand_id] = data
+
+    return {
+        "seeded": True,
+        "brand_id": brand_id,
+        "brand_name": entry.name,
+        "summary": {
+            "customers": len(data["customers"]),
+            "customer_ids": list(data["customers"].keys()),
+            "promos": len(data["promos"]),
+            "promo_codes": [p["code"] for p in data["promos"]],
+            "tools": list(data["tools"].keys()),
+        },
+        "generated_at": data["generated_at"],
+        "usage": (
+            f"Pass any customer_id from `customer_ids` as the `customer_id` field in "
+            f"POST /chat or POST /session/new to get context-aware support responses. "
+            f"Example: POST /chat {{\"session_id\": \"...\", \"message\": \"where is my order?\", "
+            f"\"customer_id\": \"{brand_id}_cust_001\"}}"
+        ),
     }
 
 
