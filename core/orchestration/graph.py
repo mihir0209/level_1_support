@@ -308,12 +308,41 @@ def check_resolution_routing(state: L1SupportState) -> Literal["tools", "escalat
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# GRAPHITI EPISODE BUILDER
+# ─────────────────────────────────────────────────────────────────────────
+
+def _build_episode_text(state: L1SupportState, outcome: str, extra: str = "") -> str:
+    """Compose a human-readable episode summary for Graphiti ingestion."""
+    intent_str = state.intent.issue_type if state.intent else "unknown"
+    category = state.intent.category.value if state.intent else "unknown"
+    entities = state.entities or {}
+
+    parts = [
+        f"Customer contacted support via {state.channel.value} about {intent_str} ({category}).",
+        f"Session lasted {state.turn_count} turn(s).",
+        f"Outcome: {outcome}.",
+    ]
+    if entities.get("order_id"):
+        parts.append(f"Order referenced: {entities['order_id']}.")
+    if entities.get("return_reason"):
+        parts.append(f"Return reason: {entities['return_reason']}.")
+    if entities.get("item_description"):
+        parts.append(f"Item: {entities['item_description']}.")
+    if state.current_resolution_id and outcome == "resolved":
+        parts.append(f"Resolution applied: {state.current_resolution_id}.")
+    if extra:
+        parts.append(extra)
+    return " ".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # NODE: escalate_session
 # ─────────────────────────────────────────────────────────────────────────
 
 async def node_escalate(state: L1SupportState) -> dict[str, Any]:
     """
     Escalate to human agent. Creates Chatwoot ticket (Phase 1: mock).
+    Writes escalation episode to Graphiti Tier 3 memory.
     """
     reason = state.escalation_reason or f"Auto-escalate after {state.resolution_attempts} attempt(s)"
     log.info(
@@ -323,6 +352,28 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
         reason=reason,
         turn_count=state.turn_count,
     )
+
+    # Tier 3: write escalation episode so future agents know this customer was escalated
+    if state.customer_id:
+        try:
+            from core.memory.graphiti_client import graphiti_memory
+            episode = _build_episode_text(state, outcome="escalated", extra=reason)
+            await graphiti_memory.add_episode(
+                customer_id=state.customer_id,
+                brand_id=state.brand_id,
+                content=episode,
+                metadata={
+                    "channel": state.channel.value,
+                    "outcome": "escalated",
+                    "reason": reason[:200],
+                    "intent": state.intent.issue_type if state.intent else "unknown",
+                },
+                episode_name=f"support_escalated:{state.session_id}",
+            )
+            log.info("graphiti_episode_written", session_id=state.session_id, outcome="escalated")
+        except Exception as e:
+            log.warning("graphiti_write_failed", session_id=state.session_id, error=str(e))
+
     return {
         "is_resolved": False,
         "outcome": SessionOutcome.ESCALATED,
@@ -336,7 +387,8 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
 
 async def node_close_session(state: L1SupportState) -> dict[str, Any]:
     """
-    Session resolved. Trigger feedback loop — update Resolution.successRate in graph.
+    Session resolved. Trigger feedback loop — update Resolution.successRate in graph
+    and write episode to Graphiti Tier 3 memory.
     """
     log.info(
         "session_closed",
@@ -356,6 +408,28 @@ async def node_close_session(state: L1SupportState) -> dict[str, Any]:
             )
         except Exception as e:
             log.warning("feedback_loop_failed", error=str(e))
+
+    # Tier 3: write resolved episode to Graphiti
+    if state.customer_id:
+        try:
+            from core.memory.graphiti_client import graphiti_memory
+            intent_str = state.intent.issue_type if state.intent else "unknown"
+            episode = _build_episode_text(state, outcome="resolved")
+            await graphiti_memory.add_episode(
+                customer_id=state.customer_id,
+                brand_id=state.brand_id,
+                content=episode,
+                metadata={
+                    "channel": state.channel.value,
+                    "outcome": "resolved",
+                    "intent": intent_str,
+                    "turns": state.turn_count,
+                },
+                episode_name=f"support_resolved:{state.session_id}",
+            )
+            log.info("graphiti_episode_written", session_id=state.session_id, outcome="resolved")
+        except Exception as e:
+            log.warning("graphiti_write_failed", session_id=state.session_id, error=str(e))
 
     return {
         "is_resolved": True,

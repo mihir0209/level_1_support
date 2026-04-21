@@ -29,7 +29,7 @@ warnings.filterwarnings("ignore", message="Pydantic serializer warnings", catego
 warnings.filterwarnings("ignore", message=".*renamed to.*ddgs.*", category=RuntimeWarning)
 
 import structlog
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -1322,6 +1322,77 @@ async def probe_brand_scraping(brand_id: str):
     base_url = f"https://{entry.domains[0]}" if entry.domains else f"https://{brand_id}.com"
     report = await probe_site_access(base_url)
     return report
+
+
+@admin_router.post("/brands/{brand_id}/documents/upload", tags=["Operations"])
+async def upload_brand_documents(
+    brand_id: str,
+    files: list[UploadFile] = File(...),
+    x_api_key: str | None = Header(None, alias="X-API-KEY"),
+):
+    """
+    Upload brand documents (PDF, DOCX, TXT, MD, HTML) to be ingested into the
+    knowledge graph and pgvector store.
+
+    Uploaded files are parsed into text chunks, each chunk is sent through the
+    same LLM extraction pipeline used for web-crawled pages, and the results
+    are written to FalkorDB + pgvector under the given brand_id.
+
+    **Supports:** `.pdf`, `.docx`, `.doc`, `.txt`, `.md`, `.html`, `.htm`
+
+    **Auth:** `X-API-KEY` header required.
+
+    Returns extraction counts and any per-file errors.
+    """
+    if x_api_key != settings.admin_api_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    from brands.registry import get_brand_by_id
+    entry = get_brand_by_id(brand_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not found.")
+
+    if not files:
+        raise HTTPException(status_code=400, detail="No files uploaded.")
+
+    import tempfile
+    from ingestion.agent_collector import collect_from_documents
+    from ingestion.doc_parser import SUPPORTED_EXTENSIONS
+    from pathlib import Path as _Path
+
+    saved_paths: list[str] = []
+    skipped: list[dict] = []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for upload in files:
+            fname = upload.filename or "upload"
+            ext = _Path(fname).suffix.lower()
+            if ext not in SUPPORTED_EXTENSIONS:
+                skipped.append({"file": fname, "reason": f"unsupported type: {ext}"})
+                continue
+            dest = _os.path.join(tmpdir, fname)
+            content = await upload.read()
+            with open(dest, "wb") as f:
+                f.write(content)
+            saved_paths.append(dest)
+
+        if not saved_paths:
+            return {
+                "brand_id": brand_id,
+                "extracted_count": 0,
+                "files_processed": 0,
+                "skipped": skipped,
+                "errors": ["No valid files to process"],
+            }
+
+        result = await collect_from_documents(
+            brand_id=brand_id,
+            brand_name=entry.name,
+            file_paths=saved_paths,
+        )
+
+    result["skipped"] = result.get("skipped", []) + skipped
+    return result
 
 
 # Register admin router

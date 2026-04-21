@@ -327,35 +327,43 @@ def _format_resolution_block(
     return "\n".join(lines)
 
 
-def _format_user_context_block(customer: Customer | None) -> str:
+def _format_user_context_block(
+    customer: Customer | None,
+    history_facts: list[str] | None = None,
+) -> str:
     if not customer:
-        return "Customer: Not identified / guest checkout."
-
-    lines = [
-        f"CUSTOMER: ID={customer.id}, Tier={customer.tier.value}, Locale={customer.locale}",
-    ]
-    if customer.recent_orders:
-        order = customer.recent_orders[0]
-        lines.append(
-            f"  Latest order: {order.id} | Status: {order.status.value} | "
-            f"Placed: {order.placed_at.strftime('%Y-%m-%d')} | "
-            f"Value: {order.currency} {order.total_value:.2f}"
-        )
-        if order.shipment and order.shipment.tracking_id:
-            eta = (
-                order.shipment.estimated_delivery.strftime("%Y-%m-%d")
-                if order.shipment.estimated_delivery else "Unknown"
-            )
+        block = "Customer: Not identified / guest checkout."
+    else:
+        lines = [
+            f"CUSTOMER: ID={customer.id}, Tier={customer.tier.value}, Locale={customer.locale}",
+        ]
+        if customer.recent_orders:
+            order = customer.recent_orders[0]
             lines.append(
-                f"  Shipment: {order.shipment.carrier} tracking={order.shipment.tracking_id} "
-                f"ETA={eta} status={order.shipment.current_status}"
+                f"  Latest order: {order.id} | Status: {order.status.value} | "
+                f"Placed: {order.placed_at.strftime('%Y-%m-%d')} | "
+                f"Value: {order.currency} {order.total_value:.2f}"
             )
-    if customer.open_returns:
-        lines.append(f"  Open returns: {len(customer.open_returns)} pending")
-    if customer.total_orders > 0:
-        lines.append(f"  Total orders placed: {customer.total_orders}")
+            if order.shipment and order.shipment.tracking_id:
+                eta = (
+                    order.shipment.estimated_delivery.strftime("%Y-%m-%d")
+                    if order.shipment.estimated_delivery else "Unknown"
+                )
+                lines.append(
+                    f"  Shipment: {order.shipment.carrier} tracking={order.shipment.tracking_id} "
+                    f"ETA={eta} status={order.shipment.current_status}"
+                )
+        if customer.open_returns:
+            lines.append(f"  Open returns: {len(customer.open_returns)} pending")
+        if customer.total_orders > 0:
+            lines.append(f"  Total orders placed: {customer.total_orders}")
+        block = "\n".join(lines)
 
-    return "\n".join(lines)
+    if history_facts:
+        block += "\n\nPAST INTERACTIONS (Graphiti memory):\n"
+        block += "\n".join(f"  - {f}" for f in history_facts[:5])
+
+    return block
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -384,8 +392,25 @@ async def assemble_context(
 
     # ── Steps 3+4+5: Parallel fetch ──────────────────────────────────────
     # User context is already passed in (fetched externally for flexibility)
-    # Graph retrieval and brand info are fetched here
-    knowledge, brand_info = await asyncio.gather(
+    # Graph retrieval, brand info, and Graphiti history run in parallel
+    customer_id = customer.id if customer else None
+
+    async def _fetch_graphiti_history() -> list[str]:
+        if not customer_id:
+            return []
+        try:
+            from core.memory.graphiti_client import graphiti_memory
+            return await graphiti_memory.search(
+                customer_id=customer_id,
+                brand_id=brand_id,
+                query=message,
+                num_results=5,
+            )
+        except Exception as e:
+            log.warning("graphiti_read_failed", brand_id=brand_id, error=str(e))
+            return []
+
+    knowledge, brand_info, history_facts = await asyncio.gather(
         asyncio.to_thread(
             retrieve_knowledge,
             brand_id,
@@ -396,6 +421,7 @@ async def assemble_context(
             intent.category.value,
         ),
         asyncio.to_thread(get_brand_info, brand_id),
+        _fetch_graphiti_history(),
     )
 
     # ── Step 6: Session Compression ──────────────────────────────────────
@@ -420,7 +446,7 @@ async def assemble_context(
     system_prompt = base_prompt + channel_addition + tone_note
 
     # Build context blocks
-    user_context_block = _format_user_context_block(customer)
+    user_context_block = _format_user_context_block(customer, history_facts)
     policy_block = _format_policy_block(knowledge.policy, brand_name)
     resolution_block = _format_resolution_block(knowledge.resolutions, knowledge.kb_items)
 

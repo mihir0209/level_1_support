@@ -1783,6 +1783,159 @@ async def run_agent_collection(
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# DOCUMENT INGESTION — PDF / DOCX / TXT / MD / HTML
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def collect_from_documents(
+    brand_id: str,
+    brand_name: str,
+    file_paths: list[str],
+) -> dict[str, Any]:
+    """
+    Ingest brand-uploaded documents (PDF, DOCX, TXT, MD, HTML) into the
+    knowledge graph and pgvector store using the same LLM extraction pipeline
+    used for web-crawled pages.
+
+    Each file is parsed into text chunks, each chunk is sent through
+    _extract_chunk (same prompt as web pages), then ontology proposals are
+    reviewed and all items are written to FalkorDB + pgvector.
+    """
+    from ingestion.doc_parser import parse_files, SUPPORTED_EXTENSIONS
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    t0 = time.monotonic()
+    llm = get_llm_client()
+
+    from core.ontology.dynamic import get_ontology_manager
+    om = get_ontology_manager()
+
+    # ── Parse all files ──────────────────────────────────────────────────
+    valid_paths = []
+    skipped = []
+    from pathlib import Path as _Path
+    for p in file_paths:
+        if not _Path(p).exists():
+            skipped.append({"path": p, "reason": "file not found"})
+            continue
+        if _Path(p).suffix.lower() not in SUPPORTED_EXTENSIONS:
+            skipped.append({"path": p, "reason": f"unsupported type: {_Path(p).suffix}"})
+            continue
+        valid_paths.append(p)
+
+    if not valid_paths:
+        return {
+            "brand_id": brand_id,
+            "extracted_count": 0,
+            "files_processed": 0,
+            "skipped": skipped,
+            "errors": ["No valid files to process"],
+        }
+
+    log.info("doc_ingest_start", brand_id=brand_id, files=len(valid_paths))
+    chunks = parse_files(valid_paths)
+
+    # ── Extract items from each chunk via LLM ─────────────────────────────
+    all_items: list[dict] = []
+    all_proposals: list[dict] = []
+    errors: list[str] = []
+
+    ontology_labels = om.get_type_labels_for_prompt()
+
+    # Process in batches of 4 to avoid hammering the LLM
+    batch_size = 4
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i + batch_size]
+        tasks = []
+        for chunk_data in batch:
+            source_label = chunk_data["source"]
+            if chunk_data.get("page"):
+                source_label += f"#page{chunk_data['page']}"
+            tasks.append(
+                _extract_chunk(
+                    llm=llm,
+                    url=f"file://{source_label}",
+                    category="document",
+                    chunk=chunk_data["text"],
+                    brand_id=brand_id,
+                    brand_name=brand_name,
+                    ontology_labels=ontology_labels,
+                )
+            )
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                errors.append(str(r))
+            else:
+                items, proposals = r
+                all_items.extend(items)
+                all_proposals.extend(proposals)
+
+    # ── Ontology review (same as web pipeline) ────────────────────────────
+    if all_proposals:
+        # Deduplicate by label
+        seen_labels: dict[str, dict] = {}
+        for p in all_proposals:
+            lbl = p.get("label", "")
+            if lbl:
+                if lbl not in seen_labels:
+                    seen_labels[lbl] = p
+                else:
+                    # Merge evidence
+                    existing = seen_labels[lbl]
+                    existing["evidence"] = (
+                        (existing.get("evidence") or "") + " | " + (p.get("evidence") or "")
+                    )[:500]
+        deduped_proposals = list(seen_labels.values())
+
+        # Quick pass: tag non-builtin proposals for apply
+        for p in deduped_proposals:
+            p.setdefault("merge_action", "add")
+
+        await _apply_proposals(deduped_proposals, brand_id)
+
+    # ── Write to stores ───────────────────────────────────────────────────
+    for item in all_items:
+        item.setdefault("source_url", f"doc://{brand_id}")
+
+    graph_n, pg_n = await asyncio.gather(
+        _write_graph(all_items, brand_id),
+        _write_pgvector(all_items, brand_id),
+        return_exceptions=True,
+    )
+    if isinstance(graph_n, Exception):
+        errors.append(f"graph write: {graph_n}"); graph_n = 0
+    if isinstance(pg_n, Exception):
+        errors.append(f"pgvector write: {pg_n}"); pg_n = 0
+
+    elapsed = round(time.monotonic() - t0, 1)
+    log.info(
+        "doc_ingest_complete",
+        brand_id=brand_id,
+        files=len(valid_paths),
+        chunks=len(chunks),
+        items=len(all_items),
+        graph=graph_n,
+        pg=pg_n,
+        elapsed_s=elapsed,
+    )
+
+    return {
+        "brand_id": brand_id,
+        "files_processed": len(valid_paths),
+        "chunks_parsed": len(chunks),
+        "extracted_count": int(graph_n),
+        "pgvector_count": int(pg_n),
+        "ontology_proposals": len(all_proposals),
+        "skipped": skipped,
+        "errors": errors,
+        "elapsed_s": elapsed,
+        "started_at": started_at,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 async def get_collection_status(brand_id: str) -> dict[str, Any] | None:
     try:
         from core.memory.session import get_redis
