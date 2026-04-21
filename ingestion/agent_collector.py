@@ -47,21 +47,37 @@ log = structlog.get_logger(__name__)
 # ── Constants ──────────────────────────────────────────────────────────────
 _BFS_BATCH = 4               # concurrent pages per BFS round
 _MAX_URLS_DEFAULT = 60       # total page cap per collection run
-_FETCH_TIMEOUT = 25          # seconds
+_FETCH_TIMEOUT = 25          # seconds per page fetch
+_PAGE_FETCH_SOFT_LIMIT = 35  # seconds: warn if a single page takes longer
 _MIN_CONTENT_LEN = 300       # skip pages shorter than this (404s, bot gates)
+_COLLECTION_TIMEOUT = 1800   # 30 min hard cap on entire collection run
 _HELP_KEYWORDS = [
     "help", "faq", "question", "support", "return", "refund", "cancel",
     "order", "ship", "deliver", "dispatch", "policy", "contact", "about",
     "customer-service", "helpcentre", "care", "exchange", "size", "payment",
 ]
 _SKIP_PATH_FRAGMENTS = [
+    # Commerce / account pages
     "/cart", "/checkout", "/login", "/register", "/account", "/wishlist",
-    "/search", ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg",
-    ".ico", "/products/", "/product/", "/collections/", "/categories/",
+    "/search", "/basket", "/bag",
+    # Static assets
+    ".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+    # Product / category browsing
+    "/products/", "/product/", "/collections/", "/categories/",
     "/category/", "/womens/", "/mens/", "/girls/", "/boys/", "/kids/",
     "/beauty/", "/skincare/", "/new-in/", "/sale/", "/offers/",
-    "?page=", "?sort=", "?colour=", "/blog/", "/news/",
-    "/basket", "/bag", "/store-locator", "/sitemap",
+    # Filtering / pagination params
+    "?page=", "?sort=", "?colour=", "?color=", "?filter=", "?variant=",
+    # Editorial / lifestyle / blog content (NOT help content)
+    "/blog/", "/news/", "/editorial", "/lifestyle", "/inspiration",
+    "/lookbook", "/look-book", "/magazine", "/journal", "/stories",
+    "/the-debrief", "/debrief", "/community", "/events", "/press",
+    "/careers", "/jobs", "/our-story", "/about-us",
+    # Shopify /pages/ editorial sub-paths (help pages use /pages/informational/ etc.)
+    "/pages/the-", "/pages/lifestyle", "/pages/editorial",
+    "/pages/blog", "/pages/inspiration", "/pages/style",
+    # Other non-help
+    "/store-locator", "/sitemap",
 ]
 
 _CATEGORIES = [
@@ -249,14 +265,20 @@ async def _stealth_crawl(url: str, expand: bool = True) -> str:
             remove_overlay_elements=True,
         )
 
+        t0 = time.monotonic()
         async with AsyncWebCrawler(config=browser_cfg) as crawler:
             result = await crawler.arun(url=url, config=run_cfg)
-            # Prefer raw HTML: lxml link extraction needs <a href> tags.
-            # trafilatura will clean it for the LLM extraction step.
-            return result.html or result.markdown or ""
+        elapsed = time.monotonic() - t0
+        if elapsed > _PAGE_FETCH_SOFT_LIMIT:
+            log.warning("slow_page_fetch", url=url[:80], elapsed_s=round(elapsed, 1))
+        # Prefer raw HTML: lxml link extraction needs <a href> tags.
+        # trafilatura will clean it for the LLM extraction step.
+        return result.html or result.markdown or ""
 
     except TypeError as e:
         log.debug("stealth_type_error", url=url, reason=str(e))
+    except asyncio.TimeoutError:
+        log.warning("stealth_timeout", url=url[:80])
     except Exception as e:
         log.debug("stealth_failed", url=url, error=str(e))
     return ""
@@ -1149,8 +1171,17 @@ async def node_collect(state: AgentCollectState) -> dict[str, Any]:
         log.info("bfs_manual_start", brand_id=brand_id, queue=len(queue_seed))
         visited: set[str] = set(already_visited)
         queue: list[str] = queue_seed
+        bfs_start = time.monotonic()
+        round_num = 0
 
         while queue and len(visited) < max_pages:
+            # Hard cap: don't let BFS run forever on slow sites
+            if time.monotonic() - bfs_start > _COLLECTION_TIMEOUT:
+                log.warning("bfs_manual_timeout", brand_id=brand_id,
+                            elapsed_s=round(time.monotonic() - bfs_start, 1),
+                            pages_so_far=len(crawled_pages))
+                break
+
             batch: list[str] = []
             while queue and len(batch) < _BFS_BATCH:
                 url = queue.pop(0)
@@ -1161,7 +1192,10 @@ async def node_collect(state: AgentCollectState) -> dict[str, Any]:
             if not batch:
                 break
 
-            log.info("bfs_round", batch=len(batch), visited=len(visited), queued=len(queue))
+            round_num += 1
+            log.info("bfs_round", brand_id=brand_id, round=round_num,
+                     batch=len(batch), pages_collected=len(crawled_pages),
+                     visited=len(visited), queued=len(queue))
             fetch_tasks = [_fetch_any(u, expand=True) for u in batch]
             fetch_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
@@ -1178,7 +1212,8 @@ async def node_collect(state: AgentCollectState) -> dict[str, Any]:
 
             await asyncio.sleep(0.5 + random.random() * 0.5)
 
-        log.info("bfs_manual_done", brand_id=brand_id, pages=len(crawled_pages))
+        log.info("bfs_manual_done", brand_id=brand_id, pages=len(crawled_pages),
+                 rounds=round_num, elapsed_s=round(time.monotonic() - bfs_start, 1))
 
     # ── Extract knowledge from all collected pages ─────────────────────────
     log.info("extract_start", brand_id=brand_id, pages=len(crawled_pages))
@@ -1196,6 +1231,14 @@ async def node_collect(state: AgentCollectState) -> dict[str, Any]:
         all_items.extend(items)
         all_proposals.extend(proposals)
 
+    if len(all_items) == 0 and len(crawled_pages) > 0:
+        log.warning(
+            "collect_zero_items",
+            brand_id=brand_id,
+            pages_crawled=len(crawled_pages),
+            hint="All pages failed help-signal check — BFS may have landed on product/editorial pages. "
+                 "Check _SKIP_PATH_FRAGMENTS and AI research agent entry points.",
+        )
     log.info(
         "collect_done",
         brand_id=brand_id,
