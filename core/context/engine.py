@@ -53,6 +53,7 @@ _TOOL_MANIFEST: dict[str, list[str]] = {
     "afterpay_return":   ["policy_lookup", "return_init"],
     "size_query":        ["size_guide", "catalog_lookup"],
     "account_locked":    ["account_status", "escalate"],
+    "delivery_query":    ["policy_lookup", "shipment_track"],
     "unknown":           ["escalate"],
 }
 
@@ -125,7 +126,7 @@ async def classify_intent(
     Fast intent classification using the cheap/fast model.
     Returns an IntentResult with issue_type slug and extracted entities.
     """
-    known_issue_types = list(_TOOL_MANIFEST.keys())
+    known_issue_types = [k for k in _TOOL_MANIFEST if k != "unknown"]
 
     # Include last 2 turns of history for context (avoid full history = slow)
     recent_history = conversation_history[-4:] if len(conversation_history) > 4 else conversation_history
@@ -276,34 +277,52 @@ def _format_policy_block(policy: dict[str, Any] | None, brand_name: str) -> str:
     )
 
 
-def _format_resolution_block(resolutions: list[dict[str, Any]]) -> str:
-    if not resolutions:
+def _format_resolution_block(
+    resolutions: list[dict[str, Any]],
+    kb_items: list[dict[str, Any]] | None = None,
+) -> str:
+    lines: list[str] = []
+
+    if resolutions:
+        best = resolutions[0]
+        steps = best.get("steps", [])
+        if isinstance(steps, str):
+            try:
+                steps = json.loads(steps.replace("'", '"'))
+            except Exception:
+                steps = []
+
+        success_rate = float(best.get("success_rate") or 0)
+        lines.append(f"RESOLUTION: {best['name']} (success rate: {success_rate:.0%})")
+        for step in steps:
+            if isinstance(step, dict):
+                instruction = step.get("instruction", "")
+                tool = step.get("tool_required", "")
+                condition = step.get("condition", "")
+                line = f"  Step {step.get('order', '?')}: {instruction}"
+                if tool:
+                    line += f" [USE TOOL: {tool}]"
+                if condition:
+                    line += f" (if: {condition})"
+                lines.append(line)
+            else:
+                lines.append(f"  - {step}")
+
+    if kb_items:
+        if lines:
+            lines.append("")
+        lines.append("BRAND KNOWLEDGE BASE:")
+        for item in kb_items[:5]:
+            label = item.get("label", "")
+            title = item.get("title", "").strip()
+            content = item.get("content", "").strip()
+            if title and content:
+                lines.append(f"  [{label}] {title}: {content[:400]}")
+            elif content:
+                lines.append(f"  [{label}] {content[:400]}")
+
+    if not lines:
         return "No specific resolution steps found. Use general support guidelines."
-
-    best = resolutions[0]
-    steps = best.get("steps", [])
-
-    if isinstance(steps, str):
-        try:
-            steps = json.loads(steps.replace("'", '"'))
-        except Exception:
-            steps = []
-
-    success_rate = float(best.get("success_rate") or 0)
-    lines = [f"RESOLUTION: {best['name']} (success rate: {success_rate:.0%})"]
-    for step in steps:
-        if isinstance(step, dict):
-            instruction = step.get("instruction", "")
-            tool = step.get("tool_required", "")
-            condition = step.get("condition", "")
-            line = f"  Step {step.get('order', '?')}: {instruction}"
-            if tool:
-                line += f" [USE TOOL: {tool}]"
-            if condition:
-                line += f" (if: {condition})"
-            lines.append(line)
-        else:
-            lines.append(f"  - {step}")
 
     return "\n".join(lines)
 
@@ -372,6 +391,9 @@ async def assemble_context(
             brand_id,
             intent.issue_type,
             customer_order_placed_at,
+            "UK",
+            message,
+            intent.category.value,
         ),
         asyncio.to_thread(get_brand_info, brand_id),
     )
@@ -400,7 +422,7 @@ async def assemble_context(
     # Build context blocks
     user_context_block = _format_user_context_block(customer)
     policy_block = _format_policy_block(knowledge.policy, brand_name)
-    resolution_block = _format_resolution_block(knowledge.resolutions)
+    resolution_block = _format_resolution_block(knowledge.resolutions, knowledge.kb_items)
 
     assembly_latency_ms = (time.monotonic() - t_start) * 1000
     log.info(
@@ -408,6 +430,8 @@ async def assemble_context(
         brand_id=brand_id,
         issue_type=intent.issue_type,
         resolution_count=len(knowledge.resolutions),
+        kb_items=len(knowledge.kb_items),
+        source=knowledge.source,
         latency_ms=round(assembly_latency_ms, 1),
     )
 
@@ -423,7 +447,8 @@ async def assemble_context(
         tool_manifest=tool_manifest,
         entities=intent.entities,
         intent=intent,
-        applicable_policy=None,   # full Policy object — populated separately if needed
-        token_estimate=0,          # rough estimate — extended in Phase 2
+        applicable_policy=None,
+        token_estimate=0,
         assembly_latency_ms=assembly_latency_ms,
+        retrieval_confidence=knowledge.confidence,
     )

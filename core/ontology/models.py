@@ -223,3 +223,4 @@ class ContextPackage(BaseModel):
     applicable_policy: ReturnPolicy | ShippingPolicy | None = None
     token_estimate: int = 0
     assembly_latency_ms: float = 0.0
+    retrieval_confidence: float = 0.0   # confidence from KB retrieval (may exceed intent confidence)

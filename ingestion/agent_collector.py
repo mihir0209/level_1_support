@@ -484,15 +484,18 @@ async def _ddg_search(brand_name: str, domain: str) -> list[str]:
     query = f'site:{domain_base} help OR faq OR "returns policy" OR "customer service"'
     found: list[str] = []
 
-    # Primary: ddgs library (formerly duckduckgo-search)
+    # Primary: ddgs library (formerly duckduckgo-search) with 15s timeout
     try:
         try:
             from ddgs import DDGS
         except ImportError:
             from duckduckgo_search import DDGS
-        results = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: list(DDGS().text(query, max_results=25))
+        results = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: list(DDGS().text(query, max_results=25))
+            ),
+            timeout=15.0,
         )
         for r in results:
             href = r.get("href", "")
@@ -501,22 +504,32 @@ async def _ddg_search(brand_name: str, domain: str) -> list[str]:
         if found:
             log.debug("ddg_library_ok", domain=domain_base, count=len(found))
             return list(dict.fromkeys(found))[:30]
+    except asyncio.TimeoutError:
+        log.info("ddg_library_timeout", domain=domain_base)
     except Exception as e:
-        log.debug("ddg_library_failed", error=str(e))
+        # Non-critical: AI research agent compensates for missing DDG results
+        log.info("ddg_library_unavailable", domain=domain_base, reason=str(e)[:80])
 
-    # Fallback: DuckDuckGo HTML scraping
-    encoded = query.replace(" ", "+").replace(":", "%3A").replace('"', "%22")
-    text = await _httpx_get(f"https://html.duckduckgo.com/html/?q={encoded}")
-    if text:
-        for m in re.finditer(r'uddg=([^&"\']+)', text):
-            import urllib.parse
-            href = urllib.parse.unquote(m.group(1))
-            if domain_base in href and href.startswith("http"):
-                found.append(href.split("?")[0])
-        for m in re.finditer(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"', text):
-            href = m.group(1)
-            if domain_base in href and href.startswith("http"):
-                found.append(href.split("?")[0])
+    # Fallback: DuckDuckGo HTML scraping (also with timeout)
+    try:
+        import urllib.parse as _urlparse
+        encoded = _urlparse.quote(query, safe="+")
+        text = await asyncio.wait_for(
+            _httpx_get(f"https://html.duckduckgo.com/html/?q={encoded}"),
+            timeout=10.0,
+        )
+        if text:
+            for m in re.finditer(r'uddg=([^&"\']+)', text):
+                href = _urlparse.unquote(m.group(1))
+                if domain_base in href and href.startswith("http"):
+                    found.append(href.split("?")[0])
+            for m in re.finditer(r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"', text):
+                href = m.group(1)
+                if domain_base in href and href.startswith("http"):
+                    found.append(href.split("?")[0])
+    except (asyncio.TimeoutError, Exception) as e:
+        log.info("ddg_html_unavailable", domain=domain_base, reason=str(e)[:60])
+
     return list(dict.fromkeys(found))[:30]
 
 
@@ -1341,21 +1354,28 @@ async def _write_pgvector(items: list[dict], brand_id: str) -> int:
             f"password={settings.postgres_password}"
         )
         async with await psycopg.AsyncConnection.connect(conn_str) as conn:
+            # Ensure table exists with the canonical schema (matches DB migration)
             await conn.execute(
                 "CREATE TABLE IF NOT EXISTS knowledge_chunks ("
                 "id uuid PRIMARY KEY DEFAULT gen_random_uuid(),"
-                "brand_id text NOT NULL, chunk_type text, content text,"
-                "metadata jsonb, created_at timestamptz DEFAULT now())"
+                "brand_id varchar(64) NOT NULL, chunk_type varchar(32), "
+                "source_url text, content text NOT NULL, "
+                "metadata jsonb DEFAULT '{}'::jsonb, "
+                "crawled_at timestamptz DEFAULT now(), "
+                "updated_at timestamptz DEFAULT now())"
             )
             for item in items:
                 body = str(item.get("content", "")).strip()
                 if not body:
                     continue
                 await conn.execute(
-                    "INSERT INTO knowledge_chunks (brand_id,chunk_type,content,metadata) VALUES (%s,%s,%s,%s)",
+                    "INSERT INTO knowledge_chunks "
+                    "(brand_id, chunk_type, source_url, content, metadata) "
+                    "VALUES (%s, %s, %s, %s, %s)",
                     (
                         brand_id,
                         item.get("entity_type", "KnowledgeItem"),
+                        item.get("source_url", ""),
                         body[:4000],
                         json.dumps({
                             "title": item.get("title", ""),

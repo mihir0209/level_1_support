@@ -99,11 +99,14 @@ async def node_assemble_context(state: L1SupportState) -> dict[str, Any]:
         latency_ms=round(context_package.assembly_latency_ms, 1),
     )
 
+    intent_conf = context_package.intent.confidence if context_package.intent else 0.0
+    effective_conf = max(intent_conf, context_package.retrieval_confidence)
+
     return {
         "context_package": context_package,
         "intent": context_package.intent,
         "entities": context_package.entities,
-        "confidence": context_package.intent.confidence if context_package.intent else 0.0,
+        "confidence": effective_conf,
         "turn_count": state.turn_count + 1,
     }
 
@@ -119,13 +122,14 @@ _INTENT_TO_AGENT = {
     "refund_delay":      "refund_agent",
     "wrong_item":        "returns_agent",
     "damaged_item":      "returns_agent",
-    "order_cancel":      "wismo_agent",   # same agent handles order management
+    "order_cancel":      "wismo_agent",
     "payment_failed":    "payment_agent",
     "promo_not_applied": "promos_agent",
     "klarna_return":     "returns_agent",
     "afterpay_return":   "returns_agent",
     "size_query":        "product_agent",
     "account_locked":    "account_agent",
+    "delivery_query":    "wismo_agent",
     "unknown":           "supervisor_agent",
 }
 

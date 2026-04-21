@@ -1,10 +1,10 @@
 """
 Knowledge Graph retrieval layer — GraphRAG implementation.
 
-Two patterns:
+Three patterns:
   A. Pre-built tool functions  — 90% of predictable L1 queries (safe, fast)
   B. Text2Cypher fallback      — novel/open-ended queries (read-only, schema-injected)
-  C. Vector semantic search    — when graph confidence is low (pgvector fallback)
+  C. KB node search            — collected FAQ/DeliveryOption/KnowledgeItem fallback
 
 Multi-brand isolation: every query function enforces brand_id as first filter.
 """
@@ -12,7 +12,8 @@ Multi-brand isolation: every query function enforces brand_id as first filter.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,14 +23,35 @@ from core.ontology.schema import get_graph_client
 
 log = structlog.get_logger(__name__)
 
+_STOP_WORDS = {
+    "what", "when", "where", "how", "does", "can", "will", "is", "are", "do",
+    "your", "the", "and", "or", "for", "my", "me", "you", "i", "a", "an",
+    "about", "this", "that", "have", "has", "be", "with", "to", "of", "in",
+    "it", "its", "not", "get", "got", "was", "were", "been", "from", "at",
+    "by", "on", "up", "out", "if", "so", "but", "just",
+}
+
+# Map intent category → most-relevant collected node labels to search first
+_CATEGORY_LABELS: dict[str, list[str]] = {
+    "delivery":   ["DeliveryOption", "FAQ", "KnowledgeItem"],
+    "return":     ["ReturnPolicy", "ReturnMethod", "ReturnEligibility", "FAQ", "Policy"],
+    "product":    ["SizeGuide", "ProductCategory", "FAQ", "KnowledgeItem"],
+    "order":      ["FAQ", "KnowledgeItem", "DeliveryOption"],
+    "payment":    ["FAQ", "KnowledgeItem"],
+    "account":    ["FAQ", "KnowledgeItem"],
+    "promotions": ["FAQ", "KnowledgeItem"],
+    "unknown":    ["FAQ", "KnowledgeItem", "DeliveryOption", "Policy"],
+}
+
 
 @dataclass
 class RetrievalResult:
     resolutions: list[dict[str, Any]]
     policy: dict[str, Any] | None
     confidence: float
-    source: str  # "graph_tool", "text2cypher", "vector"
+    source: str  # "graph_tool", "text2cypher", "kb_search"
     latency_ms: float = 0.0
+    kb_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -181,6 +203,77 @@ def get_brand_info(brand_id: str) -> dict[str, Any] | None:
     }
 
 
+def search_kb_nodes(
+    brand_id: str,
+    query_text: str,
+    intent_category: str = "unknown",
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    """
+    Pattern C: search collected KB nodes (FAQ, KnowledgeItem, DeliveryOption, etc.)
+    using keyword matching. Fires when no IssueType→Resolution path exists.
+    Returns a list of {label, title, content} dicts ranked by keyword coverage.
+    """
+    words = re.findall(r'\b[a-z]{3,}\b', query_text.lower())
+    keywords = [w for w in words if w not in _STOP_WORDS][:5]
+
+    if not keywords:
+        # Derive fallback keywords from category
+        category_defaults = {
+            "delivery": ["delivery", "shipping", "dispatch"],
+            "return": ["return", "refund", "exchange"],
+            "product": ["size", "product", "available"],
+            "payment": ["payment", "pay", "price"],
+        }
+        keywords = category_defaults.get(intent_category, ["help", "information"])
+
+    target_labels = _CATEGORY_LABELS.get(intent_category, _CATEGORY_LABELS["unknown"])
+    labels_filter = " OR ".join(f"node:{lbl}" for lbl in target_labels)
+
+    # Parameterised CONTAINS — safe against injection
+    kw_param_names = [f"kw{i}" for i in range(len(keywords))]
+    kw_conditions = " OR ".join(
+        f"(toLower(coalesce(node.content, '') + ' ' + coalesce(node.title, '') + ' ' + coalesce(node.question, '') + ' ' + coalesce(node.answer, '')) CONTAINS ${kp})"
+        for kp in kw_param_names
+    )
+
+    params: dict[str, Any] = {"brand_id": brand_id, "limit": limit}
+    for i, kw in enumerate(keywords):
+        params[f"kw{i}"] = kw
+
+    try:
+        _, graph = get_graph_client()
+        result = graph.query(
+            f"""
+            MATCH (b:Brand {{id: $brand_id}})-[]->(node)
+            WHERE ({labels_filter})
+            AND ({kw_conditions})
+            RETURN labels(node)[0] AS label,
+                   coalesce(node.title, node.question, '') AS title,
+                   coalesce(node.content, node.answer, '') AS content
+            LIMIT $limit
+            """,
+            params,
+        )
+        rows = result.result_set if result and result.result_set else []
+        items = [
+            {"label": row[0], "title": row[1] or "", "content": row[2] or ""}
+            for row in rows
+            if row[2]  # skip empty content
+        ]
+        log.info(
+            "kb_search_hit",
+            brand_id=brand_id,
+            intent_category=intent_category,
+            keywords=keywords,
+            hits=len(items),
+        )
+        return items
+    except Exception as e:
+        log.warning("kb_search_failed", brand_id=brand_id, error=str(e))
+        return []
+
+
 def update_resolution_success_rate(
     resolution_id: str,
     resolved: bool,
@@ -229,12 +322,19 @@ RETURN r.name, r.steps
 """
 
 GRAPH_SCHEMA_SUMMARY = """
-Nodes: Brand, ReturnPolicy, ShippingPolicy, IssueType, Resolution
+Nodes: Brand, ReturnPolicy, ShippingPolicy, IssueType, Resolution,
+       FAQ, KnowledgeItem, DeliveryOption, SizeGuide, Policy, ProductCategory,
+       ReturnMethod, ReturnEligibility, ContactMethod, Review
 Key relationships:
   (Brand)-[:HAS_POLICY {type, effectiveDate, region?}]->(ReturnPolicy|ShippingPolicy)
   (IssueType)-[:RESOLVED_BY {priority}]->(Resolution)
-Brand IDs follow pattern: {name}_{locale} e.g. boohoo_uk, plt_uk, nastygal_us
-Always filter by brand_id. Use MERGE not CREATE. Read-only queries only.
+  (Brand)-[:HAS_FAQ]->(FAQ)            FAQ has: question, answer, category
+  (Brand)-[:HAS_KNOWLEDGE]->(KnowledgeItem|DeliveryOption|SizeGuide|ContactMethod)
+  (Brand)-[:HAS_POLICY]->(Policy)      Policy has: policy_type, title, content
+  (Brand)-[:HAS_REVIEW]->(Review)
+  (Brand)-[:SELLS]->(ProductCategory)
+Brand IDs follow pattern: {name}_{locale} e.g. boohoo_uk, plt_uk, nastygal_us, coast_uk
+Always filter by brand_id. Read-only queries only (MATCH/RETURN/WHERE/ORDER BY/LIMIT).
 """
 
 
@@ -288,10 +388,13 @@ def retrieve_knowledge(
     issue_type_id: str,
     order_placed_at: datetime | None = None,
     region: str = "UK",
+    query_text: str = "",
+    intent_category: str = "unknown",
 ) -> RetrievalResult:
     """
     Main entry point for the Context Assembly Engine (Step 4 + Step 5).
-    Always uses Pattern A (pre-built tools). Returns structured RetrievalResult.
+    Pattern A: pre-built IssueType→Resolution paths (fast, high-confidence).
+    Pattern C fallback: keyword search across collected KB nodes when Pattern A yields nothing.
     """
     import time
     t0 = time.monotonic()
@@ -299,20 +402,28 @@ def retrieve_knowledge(
     resolutions = get_resolutions_for_issue(brand_id, issue_type_id)
     policy = get_return_policy(brand_id, order_placed_at)
 
+    # Pattern C: fall back to collected KB nodes when no IssueType path exists
+    kb_items: list[dict] = []
+    if not resolutions and query_text:
+        kb_items = search_kb_nodes(brand_id, query_text, intent_category)
+
     latency_ms = (time.monotonic() - t0) * 1000
-    confidence = 0.95 if resolutions else 0.3
+    confidence = 0.95 if resolutions else (0.75 if kb_items else 0.3)
+    source = "graph_tool" if resolutions else ("kb_search" if kb_items else "graph_tool")
 
     log.info(
         "knowledge_retrieved",
         brand_id=brand_id,
         issue_type=issue_type_id,
         resolution_count=len(resolutions),
+        kb_items=len(kb_items),
         latency_ms=round(latency_ms, 1),
     )
     return RetrievalResult(
         resolutions=resolutions,
         policy=policy,
         confidence=confidence,
-        source="graph_tool",
+        source=source,
         latency_ms=latency_ms,
+        kb_items=kb_items,
     )

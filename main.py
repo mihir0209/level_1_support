@@ -954,19 +954,23 @@ async def kb_chunks(brand_id: str | None = None, chunk_type: str | None = None, 
         )
         async with await psycopg.AsyncConnection.connect(conn_str) as conn:
             params: list = []
-            q = "SELECT id, brand_id, chunk_type, left(content,200), metadata FROM knowledge_chunks WHERE 1=1"
+            q = "SELECT id, brand_id, chunk_type, source_url, left(content,200), metadata FROM knowledge_chunks WHERE 1=1"
             if brand_id:
                 q += " AND brand_id = %s"
                 params.append(brand_id)
             if chunk_type:
                 q += " AND chunk_type = %s"
                 params.append(chunk_type)
-            q += " ORDER BY created_at DESC LIMIT %s"
+            q += " ORDER BY crawled_at DESC LIMIT %s"
             params.append(limit)
             rows = await (await conn.execute(q, params)).fetchall()
             return {
                 "count": len(rows),
-                "chunks": [{"id": str(r[0]), "brand_id": r[1], "chunk_type": r[2], "preview": r[3], "metadata": r[4]} for r in rows],
+                "chunks": [
+                    {"id": str(r[0]), "brand_id": r[1], "chunk_type": r[2],
+                     "source_url": r[3], "preview": r[4], "metadata": r[5]}
+                    for r in rows
+                ],
             }
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
