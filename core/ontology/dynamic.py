@@ -261,6 +261,77 @@ class OntologyManager:
         except Exception as e:
             log.error("ontology_activate_failed", label=label, error=str(e))
 
+    def merge_entity_type(
+        self,
+        label: str,
+        new_properties: list[str],
+        new_relationships: list,
+        enhanced_description: str,
+        evidence: str,
+        brand_id: str,
+    ) -> bool:
+        """
+        Enrich an existing active OntologyType with new properties / relationships.
+
+        Called when the ontology review agent determines that a proposal whose label
+        already exists in the schema still contributes new information.
+        Returns True if the existing type was actually enriched.
+        """
+        try:
+            graph = self._get_graph()
+
+            # Load current state
+            result = graph.query(
+                "MATCH (ot:OntologyType {label: $label, status: 'active'}) "
+                "RETURN ot.properties, ot.relationships, ot.description",
+                {"label": label},
+            )
+            if not result.result_set:
+                log.warning("merge_type_not_found", label=label)
+                return False
+
+            props_raw, rels_raw, current_desc = result.result_set[0]
+            existing_props: list[str] = json.loads(props_raw) if props_raw else []
+            existing_rels: list = json.loads(rels_raw) if rels_raw else []
+
+            # Merge: union of properties (no duplicates)
+            merged_props = list(dict.fromkeys(existing_props + new_properties))
+            # Merge relationships — unique by (node, rel_type) tuple
+            existing_rel_keys = {(r[0], r[1]) for r in existing_rels if len(r) >= 2}
+            for rel in new_relationships:
+                if len(rel) >= 2 and (rel[0], rel[1]) not in existing_rel_keys:
+                    existing_rels.append(rel)
+                    existing_rel_keys.add((rel[0], rel[1]))
+
+            changed = (merged_props != existing_props or existing_rels != json.loads(rels_raw or "[]"))
+            new_desc = enhanced_description if (enhanced_description and len(enhanced_description) > len(current_desc or "")) else current_desc
+
+            if not changed and new_desc == current_desc:
+                log.info("ontology_merge_no_change", label=label)
+                return False
+
+            graph.query(
+                "MATCH (ot:OntologyType {label: $label}) "
+                "SET ot.properties = $props, ot.relationships = $rels, "
+                "    ot.description = $desc, ot.merged_at = $now, "
+                "    ot.merge_evidence = $evidence",
+                {
+                    "label": label,
+                    "props": json.dumps(merged_props),
+                    "rels": json.dumps(existing_rels),
+                    "desc": new_desc or current_desc,
+                    "now": datetime.now(timezone.utc).isoformat(),
+                    "evidence": evidence[:500] if evidence else "",
+                },
+            )
+            log.info("ontology_type_merged", label=label, brand_id=brand_id,
+                     new_props=list(set(merged_props) - set(existing_props)))
+            return True
+
+        except Exception as e:
+            log.error("ontology_merge_failed", label=label, error=str(e))
+            return False
+
     def get_type_labels_for_prompt(self) -> str:
         """Return a comma-separated string of active entity type labels for LLM prompts."""
         types = self.get_entity_types()

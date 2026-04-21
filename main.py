@@ -776,6 +776,95 @@ async def ontology_apply_proposal(proposal_id: str):
     return {"applied": True, "proposal_id": proposal_id}
 
 
+@admin_router.post("/ontology/migrate-nodes", tags=["Ontology"])
+async def migrate_nodes_to_ontology(dry_run: bool = True):
+    """
+    Retroactively re-label :KnowledgeItem nodes to match their `entity_type` property.
+
+    **Problem**: Before this fix, all custom-typed items (SizeGuide, ContactMethod, etc.)
+    were stored as `:KnowledgeItem` nodes — only the `entity_type` property told them apart.
+    This means Cypher queries like `MATCH (n:SizeGuide)` return nothing.
+
+    **Fix**: For each `:KnowledgeItem` node with a non-generic `entity_type`, this
+    migration creates a properly-labelled replacement node, transfers all properties
+    and the `HAS_KNOWLEDGE` relationship, then deletes the old node.
+
+    Set `dry_run=false` to actually apply the migration. Defaults to dry-run.
+
+    Returns a summary of what would be / was migrated per entity type.
+    """
+    try:
+        _, graph = get_graph_client()
+
+        # Discover all non-standard entity_type values used in KnowledgeItem nodes
+        result = graph.query(
+            "MATCH (k:KnowledgeItem) "
+            "WHERE k.entity_type IS NOT NULL AND k.entity_type <> 'KnowledgeItem' "
+            "RETURN k.entity_type as t, count(k) as c ORDER BY c DESC"
+        )
+        type_counts = {r[0]: r[1] for r in result.result_set if r[0]}
+
+        if dry_run:
+            return {
+                "dry_run": True,
+                "would_migrate": type_counts,
+                "total_nodes": sum(type_counts.values()),
+                "message": "Re-run with ?dry_run=false to apply migration",
+            }
+
+        migrated: dict[str, int] = {}
+        for entity_type in type_counts:
+            # Validate label
+            import re as _re
+            if not _re.match(r'^[A-Za-z][A-Za-z0-9_]*$', entity_type):
+                migrated[entity_type] = 0
+                continue
+
+            # Fetch all KnowledgeItem nodes with this entity_type
+            nodes = graph.query(
+                f"MATCH (k:KnowledgeItem) WHERE k.entity_type = '{entity_type}' "
+                f"RETURN k.id, k.title, k.content, k.category, k.brand_id, k.source_url, k.extracted_at"
+            )
+
+            count = 0
+            for row in nodes.result_set:
+                nid, title, content, cat, brand_id, src, ext = row
+                if not nid:
+                    continue
+                t = (title or "").replace("'", "")
+                c = (content or "").replace("'", "")
+                ca = (cat or "general").replace("'", "")
+                s = (src or "").replace("'", "")
+                e = (ext or "").replace("'", "")
+                bid = (brand_id or "").replace("'", "")
+
+                # Create new node with proper label
+                graph.query(
+                    f"MERGE (n:{entity_type} {{id:'{nid}'}}) "
+                    f"SET n.entity_type='{entity_type}',n.title='{t}',"
+                    f"    n.content='{c}',n.category='{ca}',"
+                    f"    n.brand_id='{bid}',n.source_url='{s}',n.extracted_at='{e}' "
+                    f"WITH n MATCH (b:Brand {{id:'{bid}'}}) MERGE (b)-[:HAS_KNOWLEDGE]->(n)"
+                )
+                # Delete old KnowledgeItem node
+                graph.query(
+                    f"MATCH (k:KnowledgeItem {{id:'{nid}'}}) DETACH DELETE k"
+                )
+                count += 1
+
+            migrated[entity_type] = count
+            log.info("ontology_migration_type", entity_type=entity_type, migrated=count)
+
+        return {
+            "dry_run": False,
+            "migrated": migrated,
+            "total_migrated": sum(migrated.values()),
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @admin_router.get("/ontology/brand/{brand_id}", tags=["Graph"])
 async def ontology_brand(brand_id: str):
     """

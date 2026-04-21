@@ -761,7 +761,10 @@ async def _extract_chunk(
         Task 2 — PROPOSE new entity types for content that doesn't fit the known types.
         Examples of good proposals: SizeGuide, WarrantyPolicy, LoyaltyProgram,
         DeliveryZone, ContactMethod, OrderStatus, PromotionPolicy, etc.
-        Only propose if you have evidence from this snippet.
+        Only propose if you have DIRECT EVIDENCE in this specific snippet.
+        The "evidence" field must quote or specifically describe what you saw —
+        e.g. "Page shows a size table with UK 8-22 → EU 36-50 conversions and hip/waist/bust measurements"
+        NOT vague phrases like "this page contains size information".
 
         Return ONLY valid JSON (no markdown fences):
         {{
@@ -784,10 +787,10 @@ async def _extract_chunk(
             "ontology_proposals": [
                 {{
                     "label": "SizeGuide",
-                    "description": "Brand size guide tables for product categories",
-                    "properties": ["brand_id", "category", "size_chart", "measurement_unit"],
+                    "description": "Brand size guide tables for clothing categories with UK/EU/US measurements",
+                    "properties": ["brand_id", "category", "size_chart", "measurement_unit", "size_range"],
                     "relationships": [["Brand", "HAS_SIZE_GUIDE", "incoming"]],
-                    "evidence": "This page contains a women's clothing size guide"
+                    "evidence": "Page shows a table mapping UK 6-22 → EU 34-50 → US 2-18 with bust/waist/hip measurements in cm and inches across 5 clothing categories"
                 }}
             ]
         }}
@@ -1213,7 +1216,29 @@ async def node_collect(state: AgentCollectState) -> dict[str, Any]:
 # NODE 3 — Synthesis: write to FalkorDB + pgvector, apply ontology
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _valid_node_label(entity_type: str) -> str:
+    """
+    Validate that entity_type is safe to use as a FalkorDB node label.
+    Labels must start with a letter and contain only alphanumeric + underscore.
+    Falls back to 'KnowledgeItem' for anything that doesn't qualify.
+    """
+    if entity_type and re.match(r'^[A-Za-z][A-Za-z0-9_]*$', entity_type):
+        return entity_type
+    return "KnowledgeItem"
+
+
 async def _write_graph(items: list[dict], brand_id: str) -> int:
+    """
+    Write extracted items to FalkorDB using the correct ontology-aligned node label.
+
+    Node label mapping:
+    - entity_type=FAQ          → :FAQ node (question/answer schema)
+    - entity_type=Policy       → :Policy node (policy_type/content schema)
+    - entity_type=SizeGuide,
+      ContactMethod, etc.      → :SizeGuide, :ContactMethod, etc.
+                                 (ontology-registered custom types)
+    - anything else            → :KnowledgeItem (generic fallback)
+    """
     written = 0
     try:
         from core.ontology.schema import get_graph_client
@@ -1226,6 +1251,7 @@ async def _write_graph(items: list[dict], brand_id: str) -> int:
             src = str(item.get("source_url", "")).replace("'", "")
             kw = json.dumps(item.get("keywords", [])).replace("'", "")
             nid = f"{brand_id}_{uuid.uuid4().hex[:8]}"
+
             if et == "FAQ":
                 graph.query(
                     f"MERGE (n:FAQ {{id:'{nid}'}}) "
@@ -1243,9 +1269,12 @@ async def _write_graph(items: list[dict], brand_id: str) -> int:
                     f"WITH n MATCH (b:Brand {{id:'{brand_id}'}}) MERGE (b)-[:HAS_POLICY {{type:'{pt}'}}]->(n)"
                 )
             else:
+                # Use the actual entity_type as node label — aligns with ontology schema.
+                # e.g. SizeGuide items are stored as :SizeGuide nodes, not :KnowledgeItem.
+                node_label = _valid_node_label(et)
                 ext = item.get("extracted_at", datetime.now(timezone.utc).isoformat())
                 graph.query(
-                    f"MERGE (n:KnowledgeItem {{id:'{nid}'}}) "
+                    f"MERGE (n:{node_label} {{id:'{nid}'}}) "
                     f"SET n.entity_type='{et}',n.title='{title}',"
                     f"    n.content='{content}',n.category='{cat}',"
                     f"    n.brand_id='{brand_id}',n.source_url='{src}',n.extracted_at='{ext}' "
@@ -1301,6 +1330,12 @@ async def _write_pgvector(items: list[dict], brand_id: str) -> int:
 
 
 async def _apply_proposals(proposals: list[dict], brand_id: str) -> int:
+    """
+    Apply ontology proposals from node_ontology_review.
+
+    Proposals with merge_action='add'   → propose new OntologyType
+    Proposals with merge_action='merge' → enrich existing OntologyType
+    """
     applied = 0
     if not proposals:
         return 0
@@ -1313,18 +1348,32 @@ async def _apply_proposals(proposals: list[dict], brand_id: str) -> int:
             if not label or label in seen:
                 continue
             seen.add(label)
-            pid = om.propose_entity_type(
-                label=label,
-                description=p.get("description", ""),
-                properties=p.get("properties", []),
-                relationships=p.get("relationships", []),
-                brand_id=brand_id,
-                proposed_by="sub_agent",
-                evidence=p.get("evidence", ""),
-                auto_apply=True,
-            )
-            if pid != "exists":
-                applied += 1
+            action = p.get("merge_action", "add")
+
+            if action == "merge":
+                merged = om.merge_entity_type(
+                    label=label,
+                    new_properties=p.get("new_properties", []),
+                    new_relationships=p.get("new_relationships", []),
+                    enhanced_description=p.get("enhanced_description", ""),
+                    evidence=p.get("evidence", ""),
+                    brand_id=brand_id,
+                )
+                if merged:
+                    applied += 1
+            else:
+                pid = om.propose_entity_type(
+                    label=label,
+                    description=p.get("description", ""),
+                    properties=p.get("properties", []),
+                    relationships=p.get("relationships", []),
+                    brand_id=brand_id,
+                    proposed_by="sub_agent",
+                    evidence=p.get("evidence", ""),
+                    auto_apply=True,
+                )
+                if pid != "exists":
+                    applied += 1
     except Exception as e:
         log.warning("ontology_failed", error=str(e))
     return applied
@@ -1367,102 +1416,148 @@ async def node_ontology_review(state: AgentCollectState) -> dict[str, Any]:
     """
     Ontology review agent — runs after collect, before synthesize.
 
-    Receives all raw proposals raised by extraction subagents (often duplicated
-    across many pages) and:
-    1. Deduplicates semantically similar proposals (ReturnPolicy ≈ ReturnsPolicy)
-    2. Rejects proposals that are just aliases of built-in types
-    3. Enriches surviving proposals with better descriptions and properties
-    4. Returns a curated list ready for _apply_proposals()
+    Three-way decision for each proposal:
+    - APPROVED  → genuinely new entity type, add to ontology
+    - MERGED    → label already exists, but this proposal adds new properties /
+                  improves description → enrich the existing OntologyType
+    - REJECTED  → alias of built-in, too vague, or adds nothing new
+
+    Also requires agents to justify proposals with specific evidence so the
+    architect can make informed decisions.
     """
     proposals = state["ontology_proposals"]
     if not proposals:
         return {}
 
-    # Deduplicate by label before even calling the LLM
+    # Deduplicate by label, accumulating evidence across pages
     seen_labels: dict[str, dict] = {}
     for p in proposals:
         label = p.get("label", "").strip()
         if not label:
             continue
         if label not in seen_labels:
-            seen_labels[label] = p
+            seen_labels[label] = dict(p)  # copy so we can mutate
         else:
-            # Merge evidence
             existing = seen_labels[label]
-            existing["evidence"] = (existing.get("evidence", "") + "; " + p.get("evidence", "")).strip("; ")
+            # Accumulate evidence from multiple page occurrences
+            ev_parts = [existing.get("evidence", ""), p.get("evidence", "")]
+            existing["evidence"] = " | ".join(x for x in ev_parts if x).strip(" |")
+            # Union properties
+            existing["properties"] = list(dict.fromkeys(
+                existing.get("properties", []) + p.get("properties", [])
+            ))
 
     raw_unique = list(seen_labels.values())
     if not raw_unique:
         return {}
 
-    log.info("ontology_review_start", brand_id=state["brand_id"], raw_proposals=len(proposals), unique=len(raw_unique))
+    log.info("ontology_review_start", brand_id=state["brand_id"],
+             raw_proposals=len(proposals), unique=len(raw_unique))
 
-    # If only 1-2 proposals and none overlap with builtins, skip LLM review
     non_builtin = [p for p in raw_unique if p.get("label") not in _BUILTIN_ENTITY_TYPES]
     if not non_builtin:
         log.info("ontology_review_all_builtin", brand_id=state["brand_id"])
         return {"ontology_proposals": []}
 
+    # Load CURRENT active ontology types with their properties (for merge decisions)
+    current_types: dict[str, dict] = {}
+    try:
+        from core.ontology.dynamic import get_ontology_manager
+        for t in get_ontology_manager().get_entity_types(include_builtin=False):
+            current_types[t["label"]] = t
+    except Exception:
+        pass
+
     llm = get_llm_client()
     proposals_json = json.dumps(non_builtin, indent=2)
+    current_types_json = json.dumps(
+        {k: {"description": v["description"], "properties": v["properties"]}
+         for k, v in current_types.items()},
+        indent=2,
+    ) if current_types else "{}"
 
     prompt = textwrap.dedent(f"""
-        You are an ontology architect reviewing entity type proposals raised by AI data
-        collection agents for an e-commerce customer support knowledge graph.
+        You are an ontology architect for an e-commerce customer support knowledge graph.
 
-        Built-in types that already exist (DO NOT re-propose these):
+        === FIXED BUILT-IN TYPES (cannot change, do not re-propose) ===
         {', '.join(sorted(_BUILTIN_ENTITY_TYPES))}
 
-        Raw proposals from collection agents:
+        === ACTIVE CUSTOM TYPES ALREADY IN THE SCHEMA ===
+        {current_types_json}
+
+        === PROPOSALS RAISED BY COLLECTION AGENTS ===
         {proposals_json}
 
-        Your task:
-        1. DEDUPLICATE: merge proposals that mean the same thing (e.g. ReturnPolicy and
-           ReturnsPolicy both mean the same type → keep the cleaner name).
-        2. VALIDATE: reject proposals that are just aliases of built-in types above.
-        3. REJECT: remove proposals that are too vague (e.g. "Content", "Page", "Item").
-        4. ENRICH: for proposals that pass, improve the description and add useful
-           property names. Think: what fields would a customer-service agent need?
-        5. APPROVE: keep proposals that represent genuinely distinct knowledge entities
-           specific to e-commerce support (e.g. SizeGuide, WarrantyPolicy, LoyaltyProgram,
-           DeliveryZone, ContactMethod, PromotionPolicy, OrderStatus).
+        For each proposal decide ONE of:
+
+        APPROVE — The label is genuinely new (not in built-ins or active types),
+          represents a distinct e-commerce support entity, and is specific enough
+          to be useful. Add it to the schema.
+
+        MERGE — The label already exists in the active custom types above, but this
+          proposal contains NEW properties not currently in the schema, or a better
+          description. Enrich the existing type — do NOT add it as a new type.
+
+        REJECT — Pure alias of a built-in or active type, too vague ("Content",
+          "Page", "Item"), or adds no new information beyond what's already there.
 
         Return ONLY valid JSON (no markdown fences):
         {{
             "approved": [
                 {{
+                    "label": "DeliveryZone",
+                    "description": "Geographic delivery zones with specific carrier rules and cut-off times",
+                    "properties": ["brand_id", "zone_name", "carrier", "cutoff_time", "standard_days", "express_available"],
+                    "relationships": [["Brand", "HAS_DELIVERY_ZONE", "incoming"]],
+                    "evidence": "Page lists Northern Ireland surcharge of £5.95 and 3-5 day delivery vs 2-3 days mainland UK",
+                    "merge_action": "add"
+                }}
+            ],
+            "merged": [
+                {{
                     "label": "SizeGuide",
-                    "description": "Brand-specific size guide tables for clothing categories",
-                    "properties": ["brand_id", "category", "size_chart", "measurement_unit", "source_url"],
-                    "relationships": [["Brand", "HAS_SIZE_GUIDE", "incoming"]],
-                    "evidence": "Found on women's clothing pages and dedicated size guide page",
-                    "review_notes": "Distinct from FAQ — structured tabular data"
+                    "new_properties": ["chest_measurements_cm", "model_height"],
+                    "new_relationships": [],
+                    "enhanced_description": "Brand size guide tables including UK/EU/US conversions and body measurement ranges",
+                    "evidence": "Page adds chest measurements in cm not present in current SizeGuide schema",
+                    "merge_action": "merge"
                 }}
             ],
             "rejected": [
-                {{"label": "Policy", "reason": "duplicate of built-in Policy type"}}
+                {{"label": "Policy", "reason": "alias of built-in Policy type"}}
             ]
         }}
     """).strip()
 
     try:
-        raw = await llm.generate(prompt, max_tokens=2048, fast=False)
+        raw = await llm.generate(prompt, max_tokens=3000, fast=False)
         m = re.search(r'\{[\s\S]+\}', raw)
         if m:
             data = json.loads(m.group(0))
             approved = data.get("approved", [])
+            merged = data.get("merged", [])
             rejected = data.get("rejected", [])
+
+            # Tag action field on each
+            for p in approved:
+                p["merge_action"] = "add"
+            for p in merged:
+                p["merge_action"] = "merge"
+
             log.info(
                 "ontology_review_done",
                 brand_id=state["brand_id"],
                 approved=len(approved),
+                merged=len(merged),
                 rejected=len(rejected),
             )
-            return {"ontology_proposals": approved}
+            return {"ontology_proposals": approved + merged}
     except Exception as e:
         log.warning("ontology_review_failed", error=str(e))
 
-    # On failure, return the deduplicated non-builtin proposals as-is
+    # Fallback: pass non-builtin proposals through as-is
+    for p in non_builtin:
+        p.setdefault("merge_action", "add")
     return {"ontology_proposals": non_builtin}
 
 
