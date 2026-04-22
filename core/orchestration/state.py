@@ -50,6 +50,8 @@ class L1SupportState(BaseModel):
 
     # ── Specialist agent routing ───────────────────────────────────────
     routed_to_agent: str | None = None   # which specialist handled this turn
+    specialist_response: str | None = None  # output from specialist agent (already includes tools)
+    specialist_used: bool = False          # whether a specialist ran this turn
 
     # ── Outcome ────────────────────────────────────────────────────────
     is_resolved: bool = False

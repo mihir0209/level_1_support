@@ -577,7 +577,8 @@ def upsert_brand(graph, brand: Brand) -> None:
             b.default_locale = $default_locale,
             b.tier = $tier,
             b.target_demographic = $target_demographic,
-            b.voice_persona = $voice_persona
+            b.voice_persona = $voice_persona,
+            b.chatwoot_inbox_id = $chatwoot_inbox_id
         """,
         {
             "id": brand.id, "name": brand.name, "group_id": brand.group_id,
@@ -585,6 +586,7 @@ def upsert_brand(graph, brand: Brand) -> None:
             "default_locale": brand.default_locale, "tier": brand.tier.value,
             "target_demographic": brand.target_demographic,
             "voice_persona": brand.voice_persona,
+            "chatwoot_inbox_id": brand.chatwoot_inbox_id,
         },
     )
 

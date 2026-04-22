@@ -5,11 +5,13 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- for full-text search
 -- ─── Knowledge chunk embeddings (vector fallback) ──────────────────────
 CREATE TABLE IF NOT EXISTS knowledge_chunks (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chunk_id    VARCHAR(128) NOT NULL UNIQUE,
     brand_id    VARCHAR(64) NOT NULL,
     source_url  TEXT,
     content     TEXT NOT NULL,
     chunk_type  VARCHAR(32),   -- faq, policy, resolution_step, product
-    embedding   vector(1536),  -- text-embedding-3-small dimensions
+    embedding   vector,  -- text-embedding-3-small dimensions
+    confidence  FLOAT,         -- LLM extraction confidence (0.0-1.0)
     metadata    JSONB DEFAULT '{}',
     crawled_at  TIMESTAMPTZ DEFAULT NOW(),
     updated_at  TIMESTAMPTZ DEFAULT NOW()

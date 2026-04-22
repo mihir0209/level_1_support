@@ -147,6 +147,31 @@ async def _queue_for_review(results: list[ValidationResult]) -> int:
         return 0
 
 
+async def _ensure_chunk_table(conn) -> None:
+    """Create knowledge_chunks table if it doesn't exist (supports fresh Postgres installs)."""
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_chunks (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            chunk_id    VARCHAR(128) NOT NULL UNIQUE,
+            brand_id    VARCHAR(64) NOT NULL,
+            source_url  TEXT,
+            content     TEXT NOT NULL,
+            chunk_type  VARCHAR(32),
+            embedding   vector,
+            confidence  FLOAT,
+            metadata    JSONB DEFAULT '{}',
+            crawled_at  TIMESTAMPTZ DEFAULT NOW(),
+            updated_at  TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+    try:
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chunks_brand ON knowledge_chunks (brand_id)"
+        )
+    except Exception:
+        pass  # index may already exist
+
+
 async def _embed_and_store_faqs(results: list[ValidationResult]) -> int:
     """Embed FAQ content and store in Postgres pgvector for vector fallback search."""
     faq_results = [r for r in results if r.item_type == "faq"]
@@ -159,6 +184,8 @@ async def _embed_and_store_faqs(results: list[ValidationResult]) -> int:
 
         llm = get_llm_client()
         conn = await asyncpg.connect(settings.postgres_dsn.replace("+asyncpg", ""))
+        await _ensure_chunk_table(conn)
+
         stored = 0
         for r in faq_results:
             d = r.item_data
@@ -168,12 +195,13 @@ async def _embed_and_store_faqs(results: list[ValidationResult]) -> int:
             await conn.execute(
                 """
                 INSERT INTO knowledge_chunks
-                    (chunk_id, brand_id, source_url, chunk_type, content, embedding, confidence, created_at)
+                    (chunk_id, brand_id, source_url, chunk_type, content, embedding, confidence, crawled_at)
                 VALUES ($1, $2, $3, 'faq', $4, $5, $6, NOW())
                 ON CONFLICT (chunk_id) DO UPDATE
                     SET content = EXCLUDED.content,
                         embedding = EXCLUDED.embedding,
-                        confidence = EXCLUDED.confidence
+                        confidence = EXCLUDED.confidence,
+                        updated_at = NOW()
                 """,
                 chunk_id,
                 r.brand_id,

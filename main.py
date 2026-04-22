@@ -1057,6 +1057,29 @@ async def add_brand(req: BrandRegisterRequest):
     except Exception as e:
         log.warning("brand_redis_persist_failed", brand_id=req.brand_id, error=str(e))
 
+    # Also create the Brand node in FalkorDB so the graph reflects the new brand
+    try:
+        from core.ontology.models import Brand, BrandTier
+        from core.ontology.seed_data import upsert_brand, get_graph_client
+        graph_ok, graph = get_graph_client()
+        if graph_ok:
+            brand_for_graph = Brand(
+                id=entry.brand_id,
+                name=entry.name,
+                group_id="boohoo_group",
+                domain=entry.domains[0] if entry.domains else f"{entry.brand_id}.com",
+                help_center_url=f"https://{entry.domains[0]}/help" if entry.domains else "https://example.com/help",
+                default_locale=entry.locales[0] if entry.locales else "en-GB",
+                tier=BrandTier.MID,
+                target_demographic="Customers",
+                voice_persona="Professional and helpful",
+                chatwoot_inbox_id=entry.chatwoot_inbox_id,
+            )
+            upsert_brand(graph, brand_for_graph)
+            log.info("brand_graph_node_created", brand_id=entry.brand_id)
+    except Exception as e:
+        log.warning("brand_graph_node_failed", brand_id=entry.brand_id, error=str(e))
+
     log.info("brand_registered", brand_id=req.brand_id, name=req.name, domains=req.domains)
     return {
         "registered": True,

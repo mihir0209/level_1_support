@@ -3,20 +3,20 @@ LangGraph state machine — the orchestration core.
 
 Nodes:
   assemble_context   → Context Engineering Engine (8-step pipeline)
-  route_to_agent     → Select specialist agent via Swarms HierarchicalSwarm
-  execute_tools      → Run tool calls returned by the specialist
-  generate_response  → Main LLM call with full ContextPackage
-  check_resolution   → Decide: next turn | escalate | close
-  escalate_session   → Create Chatwoot ticket, human handoff
-  close_session      → Log outcome, update graph, trigger feedback loop
+  route_to_agent    → Execute specialist agent (WISMO/Returns/Refund/etc.)
+  execute_tools     → Run tool calls from specialist
+  generate_response → Specialist output or primary LLM fallback
+  check_resolution  → Decide: next turn | escalate | close
+  escalate_session  → Write to MemPalace + Graphiti, create Chatwoot ticket
+  close_session     → Write to MemPalace + Graphiti, trigger feedback loop
 
 Edge routing:
   START → assemble_context → route_to_agent
-  route_to_agent → execute_tools  (if tools needed)
-  route_to_agent → generate_response  (direct response)
-  execute_tools  → generate_response
-  generate_response → check_resolution
-  check_resolution → [await_next_turn | escalate | close]
+  route_to_agent → generate_response (specialist output)
+  generate_response → END (specialist path) | tools | escalate | close | END
+  tools → generate_response
+  escalate → END
+  close → END
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from core.ontology.models import Channel, Customer, SessionOutcome
 from core.orchestration.llm import get_llm_client
 from core.orchestration.state import L1SupportState
 from core.tools.registry import ALL_TOOLS, TOOL_REGISTRY
+from core.memory.mempalace_client import mempalace
 
 log = structlog.get_logger(__name__)
 
@@ -136,20 +137,71 @@ _INTENT_TO_AGENT = {
 
 async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
     """
-    Determine which specialist agent handles this intent.
-    Attaches the routed agent name to state.
-    The actual response generation happens in node_generate_response.
+    Route to the appropriate specialist agent and execute it.
+    The agent handles tools internally and returns a final text response.
+    We skip tool execution in the LangGraph ToolNode — the specialist
+    agent owns that loop up to its max_loops limit.
     """
+    from core.agents.specialists import get_agent_for_intent
+    from core.agents.base import run_specialist
+
     intent_id = state.intent.issue_type if state.intent else "unknown"
     agent_name = _INTENT_TO_AGENT.get(intent_id, "supervisor_agent")
 
-    log.info(
-        "routed_to_agent",
-        session_id=state.session_id,
-        intent=intent_id,
-        agent=agent_name,
+    # Build task description from context
+    last_msg = ""
+    for msg in reversed(state.messages):
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            last_msg = msg.get("content", "")
+            break
+        elif hasattr(msg, "content"):
+            last_msg = msg.content
+            break
+
+    entities = state.entities or {}
+    entity_str = ", ".join(f"{k}={v}" for k, v in entities.items()) if entities else "none"
+    task = (
+        f"Customer message: \"{last_msg}\"\n"
+        f"Brand: {state.brand_id}\n"
+        f"Extracted entities: {entity_str}\n"
+        f"Policy context: {state.context_package.policy_block if state.context_package else 'none'}\n"
+        f"Resolution steps available: {state.context_package.resolution_block if state.context_package else 'none'}"
     )
-    return {"routed_to_agent": agent_name}
+
+    try:
+        specialist = get_agent_for_intent(intent_id)
+        response = await run_specialist(
+            agent=specialist,
+            task=task,
+            brand_id=state.brand_id,
+            customer_id=state.customer_id,
+        )
+        log.info(
+            "specialist_agent_ran",
+            session_id=state.session_id,
+            intent=intent_id,
+            agent=agent_name,
+            response_len=len(response),
+        )
+        return {
+            "routed_to_agent": agent_name,
+            "specialist_response": response,
+            "specialist_used": True,
+        }
+    except Exception as e:
+        log.warning(
+            "specialist_agent_failed_fallback",
+            session_id=state.session_id,
+            intent=intent_id,
+            agent=agent_name,
+            error=str(e),
+        )
+        # Fall back to direct LLM in node_generate_response
+        return {
+            "routed_to_agent": agent_name,
+            "specialist_response": None,
+            "specialist_used": False,
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -209,13 +261,35 @@ def _build_llm_messages(state: L1SupportState) -> list:
 
 async def node_generate_response(state: L1SupportState) -> dict[str, Any]:
     """
-    Main LLM call. Uses the primary model with tools bound.
-    Returns the AI response (with optional tool calls) appended to messages.
+    Generate the AI response.
+
+    If a specialist agent ran (node_route_to_agent), use its response directly —
+    the specialist already executed its tool loop. Otherwise fall back to a direct
+    primary-model call with tool binding.
     """
+    # Specialist response path — agent handled everything, return it verbatim
+    if state.specialist_used and state.specialist_response:
+        response = AIMessage(content=state.specialist_response)
+        log.info(
+            "response_from_specialist",
+            session_id=state.session_id,
+            agent=state.routed_to_agent,
+        )
+        # Specialists should signal resolution themselves — increment attempts conservatively
+        updates: dict[str, Any] = {
+            "messages": [response],
+            "resolution_attempts": state.resolution_attempts + 1,
+        }
+        if "[resolved]" in state.specialist_response.lower():
+            updates["current_resolution_id"] = (
+                state.context_package.intent.issue_type if state.context_package and state.context_package.intent else "specialist"
+            )
+        return updates
+
+    # Direct LLM path — specialist was not used or failed
     llm = get_llm_client()
     lc_client = llm.get_lc_client(fast=False)
 
-    # Bind only the tools relevant to this intent
     available_tool_names = state.context_package.tool_manifest if state.context_package else []
     available_tools = [t for name, t in TOOL_REGISTRY.items() if name in available_tool_names]
 
@@ -241,15 +315,12 @@ async def node_generate_response(state: L1SupportState) -> dict[str, Any]:
         has_tool_calls=bool(getattr(response, "tool_calls", None)),
     )
 
-    updates: dict[str, Any] = {"messages": [response]}
+    updates = {"messages": [response]}
 
-    # If no tool calls — this is a direct text response, increment attempt counter
     if not getattr(response, "tool_calls", None):
         updates["resolution_attempts"] = state.resolution_attempts + 1
         if state.context_package and state.context_package.intent:
-            updates["current_resolution_id"] = (
-                state.context_package.intent.issue_type  # placeholder, refined in Phase 2
-            )
+            updates["current_resolution_id"] = state.context_package.intent.issue_type
 
     return updates
 
@@ -258,16 +329,23 @@ async def node_generate_response(state: L1SupportState) -> dict[str, Any]:
 # NODE: check_resolution  (routing decision node)
 # ─────────────────────────────────────────────────────────────────────────
 
-def check_resolution_routing(state: L1SupportState) -> Literal["tools", "escalate", "close", "continue"]:
+def check_resolution_routing(state: L1SupportState) -> Literal["tools", "escalate", "close", "continue", "end"]:
     """
     Conditional edge: decide what happens after generate_response.
 
-    Returns:
+    If a specialist agent ran this turn, return its response verbatim to the
+    customer and end the graph turn — the next customer message starts a fresh cycle.
+
+    Otherwise:
       "tools"    → there are tool calls to execute
       "escalate" → we should create a human ticket
       "close"    → session is resolved
       "continue" → wait for next customer message (happy path)
     """
+    # Specialist path — one-shot, return to customer and wait for next message
+    if state.specialist_used:
+        return "end"
+
     last_ai_message = None
     for msg in reversed(state.messages):
         if isinstance(msg, AIMessage):
@@ -343,7 +421,10 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
     """
     Escalate to human agent. Creates Chatwoot ticket (Phase 1: mock).
     Writes escalation episode to Graphiti Tier 3 memory.
+    Writes verbatim transcript to MemPalace Tier 2 memory.
     """
+    import asyncio
+
     reason = state.escalation_reason or f"Auto-escalate after {state.resolution_attempts} attempt(s)"
     log.info(
         "session_escalated",
@@ -353,7 +434,41 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
         turn_count=state.turn_count,
     )
 
-    # Tier 3: write escalation episode so future agents know this customer was escalated
+    # Build transcript for MemPalace
+    transcript_lines = []
+    for msg in state.messages:
+        if isinstance(msg, dict):
+            role = "Customer" if msg.get("role") == "user" else "Agent"
+            transcript_lines.append(f"{role}: {msg.get('content', '')}")
+        elif hasattr(msg, "content"):
+            role = "Agent" if isinstance(msg, AIMessage) else "Customer"
+            transcript_lines.append(f"{role}: {msg.content}")
+
+    loop = asyncio.get_event_loop()
+
+    # Tier 2: verbatim session → MemPalace
+    if state.customer_id:
+        try:
+            transcript = "\n".join(transcript_lines)
+            await loop.run_in_executor(
+                None,
+                lambda: mempalace.remember(
+                    brand_id=state.brand_id,
+                    customer_id=state.customer_id,
+                    session_id=state.session_id,
+                    content=transcript,
+                    metadata={
+                        "outcome": "escalated",
+                        "channel": state.channel.value,
+                        "turns": state.turn_count,
+                    },
+                ),
+            )
+            log.info("mempalace_stored", session_id=state.session_id, outcome="escalated")
+        except Exception as e:
+            log.warning("mempalace_write_failed", session_id=state.session_id, error=str(e))
+
+    # Tier 3: write escalation episode → Graphiti
     if state.customer_id:
         try:
             from core.memory.graphiti_client import graphiti_memory
@@ -387,9 +502,11 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
 
 async def node_close_session(state: L1SupportState) -> dict[str, Any]:
     """
-    Session resolved. Trigger feedback loop — update Resolution.successRate in graph
-    and write episode to Graphiti Tier 3 memory.
+    Session resolved. Trigger feedback loop — update Resolution.successRate in graph,
+    write verbatim transcript to MemPalace Tier 2, and episode to Graphiti Tier 3.
     """
+    import asyncio
+
     log.info(
         "session_closed",
         session_id=state.session_id,
@@ -397,6 +514,18 @@ async def node_close_session(state: L1SupportState) -> dict[str, Any]:
         outcome="resolved",
         turns=state.turn_count,
     )
+
+    # Build transcript for MemPalace
+    transcript_lines = []
+    for msg in state.messages:
+        if isinstance(msg, dict):
+            role = "Customer" if msg.get("role") == "user" else "Agent"
+            transcript_lines.append(f"{role}: {msg.get('content', '')}")
+        elif hasattr(msg, "content"):
+            role = "Agent" if isinstance(msg, AIMessage) else "Customer"
+            transcript_lines.append(f"{role}: {msg.content}")
+
+    loop = asyncio.get_event_loop()
 
     # Feedback loop: update graph
     if state.current_resolution_id:
@@ -409,7 +538,29 @@ async def node_close_session(state: L1SupportState) -> dict[str, Any]:
         except Exception as e:
             log.warning("feedback_loop_failed", error=str(e))
 
-    # Tier 3: write resolved episode to Graphiti
+    # Tier 2: verbatim session → MemPalace
+    if state.customer_id:
+        try:
+            transcript = "\n".join(transcript_lines)
+            await loop.run_in_executor(
+                None,
+                lambda: mempalace.remember(
+                    brand_id=state.brand_id,
+                    customer_id=state.customer_id,
+                    session_id=state.session_id,
+                    content=transcript,
+                    metadata={
+                        "outcome": "resolved",
+                        "channel": state.channel.value,
+                        "turns": state.turn_count,
+                    },
+                ),
+            )
+            log.info("mempalace_stored", session_id=state.session_id, outcome="resolved")
+        except Exception as e:
+            log.warning("mempalace_write_failed", session_id=state.session_id, error=str(e))
+
+    # Tier 3: write resolved episode → Graphiti
     if state.customer_id:
         try:
             from core.memory.graphiti_client import graphiti_memory
@@ -466,10 +617,11 @@ def build_graph() -> StateGraph:
         "generate_response",
         check_resolution_routing,
         {
+            "end":      END,       # specialist handled — end this turn; next message restarts
             "tools":    "tools",
             "escalate": "escalate",
             "close":    "close",
-            "continue": END,      # wait for next user message
+            "continue": END,        # no tool calls, wait for next customer message
         },
     )
 
