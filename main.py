@@ -154,14 +154,24 @@ app.add_middleware(
 # Serve the admin visualizer at /admin/ui
 import os as _os
 _static_dir = _os.path.join(_os.path.dirname(__file__), "static")
+_admin_dir = _os.path.join(_static_dir, "admin")
 if _os.path.isdir(_static_dir):
     app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+if _os.path.isdir(_admin_dir):
+    app.mount("/admin/static", StaticFiles(directory=_admin_dir), name="admin_static")
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Redirect root → /admin/ui (the main operator dashboard)."""
+    from starlette.responses import RedirectResponse
+    return RedirectResponse(url="/admin/ui", status_code=302)
 
 
 @app.get("/admin/ui", include_in_schema=False)
 async def admin_ui():
-    """Admin visualizer — knowledge graph & system dashboard."""
-    return FileResponse(_os.path.join(_static_dir, "admin", "graph.html"))
+    """L1 Support AI — main operator dashboard (support demo, sessions, monitoring, admin)."""
+    return FileResponse(_os.path.join(_static_dir, "admin", "index.html"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

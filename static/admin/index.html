@@ -1,0 +1,1776 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>L1 Support AI — E-Commerce Platform</title>
+
+  <!-- Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <!-- Global styles -->
+  <link href="/static/admin/css/main.css" rel="stylesheet" />
+
+  <!-- Alpine.js + Tailwind CDN -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50:'#fdf4ff',100:'#fae8ff',200:'#f5d0fe',300:'#f0abfc',400:'#e879f9',
+                     500:'#d946ef',600:'#c026d3',700:'#a21caf',800:'#86198f',900:'#701a75' },
+            surface:{ 50:'#f8fafc',100:'#f1f5f9',200:'#e2e8f0',300:'#cbd5e1',
+                     700:'#334155',800:'#1e293b',900:'#0f172a' },
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="h-full bg-surface-50 dark:bg-surface-900 text-surface-800 dark:text-surface-200"
+      style="font-family:Inter,system-ui,sans-serif">
+
+<!-- ═══════════════════════════════════════════════
+     TOAST CONTAINER
+════════════════════════════════════════════════ -->
+<div class="toast-container" id="toasts" x-data="toasts()" x-init="init()">
+  <template x-for="t in items" :key="t.id">
+    <div class="toast" :class="t.cls" x-text="t.msg"></div>
+  </template>
+</div>
+
+<!-- ═══════════════════════════════════════════════
+     MAIN APP
+════════════════════════════════════════════════ -->
+<div id="app" x-data="app()" x-init="$nextTick(() => init())" x-cloak>
+
+  <!-- ── HEADER ────────────────────────────────── -->
+  <header class="fixed top-0 left-0 right-0 z-50 bg-white/90 dark:bg-surface-800/90 backdrop-blur border-b border-surface-200 dark:border-surface-700">
+    <div class="max-w-screen-xl mx-auto px-4 h-14 flex items-center justify-between">
+
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-brand-600 flex items-center justify-center flex-shrink-0">
+          <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"/>
+          </svg>
+        </div>
+        <div>
+          <div class="font-semibold text-sm leading-tight">L1 Support AI</div>
+          <div class="text-xs text-surface-400 leading-tight">E-Commerce Platform</div>
+        </div>
+      </div>
+
+      <!-- Top nav -->
+      <nav class="hidden md:flex gap-1">
+        <template x-for="tab in navTabs" :key="tab.id">
+          <button @click="activeTab = tab.id"
+            :class="activeTab===tab.id
+              ? 'tab-active border-b-2 border-brand-600 text-brand-700 font-medium'
+              : 'text-surface-500 hover:text-surface-800'"
+            class="px-3 py-2 text-sm transition-colors" x-text="tab.label"></button>
+        </template>
+      </nav>
+
+      <!-- Mobile nav -->
+      <select @change="activeTab = $event.target.value"
+        class="md:hidden text-xs rounded border border-surface-200 bg-white dark:bg-surface-800 px-2 py-1">
+        <template x-for="tab in navTabs" :key="tab.id">
+          <option :value="tab.id" x-text="tab.label" :selected="activeTab===tab.id"></option>
+        </template>
+      </select>
+
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-1.5 text-xs text-surface-500">
+          <span class="w-2 h-2 rounded-full animate-pulse"
+            :class="healthOk ? 'bg-green-500' : 'bg-red-500'"></span>
+          <span class="hidden sm:inline" x-text="healthOk ? 'Systems OK' : 'Degraded'"></span>
+        </div>
+        <button @click="toggleTheme()"
+          class="p-1.5 rounded-lg hover:bg-surface-100 dark:hover:bg-surface-700 transition-colors">
+          <svg x-show="theme==='light'" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l.707-.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/>
+          </svg>
+          <svg x-show="theme==='dark'" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── MAIN ────────────────────────────────────── -->
+  <main class="pt-14 min-h-screen">
+
+    <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  1 · SUPPORT DEMO            ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='demo'" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+
+      <!-- Selector bar -->
+      <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 p-4 mb-6">
+        <div class="flex flex-wrap items-center gap-4">
+
+          <div class="flex flex-col gap-1">
+            <label class="text-xs font-medium text-surface-400 uppercase tracking-wide">Brand</label>
+            <select x-model="selectedBrand" @change="onBrandChange()"
+              class="pl-3 pr-8 py-2 rounded-lg border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+              <template x-for="b in brands" :key="b.brand_id">
+                <option :value="b.brand_id" x-text="b.name+' ('+b.brand_id+')'"></option>
+              </template>
+            </select>
+          </div>
+
+          <div class="flex flex-col gap-1">
+            <label class="text-xs font-medium text-surface-400 uppercase tracking-wide">Channel</label>
+            <select x-model="selectedChannel"
+              class="pl-3 pr-8 py-2 rounded-lg border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+              <template x-for="ch in ['chat','email','voice','whatsapp']" :key="ch">
+                <option :value="ch" x-text="ch.charAt(0).toUpperCase()+ch.slice(1)"></option>
+              </template>
+            </select>
+          </div>
+
+          <div class="flex flex-col gap-1">
+            <label class="text-xs font-medium text-surface-400 uppercase tracking-wide">Customer</label>
+            <select x-model="selectedCustomer" @change="loadCustomerContext()"
+              class="pl-3 pr-8 py-2 rounded-lg border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+              <option value="">— Guest —</option>
+              <template x-for="c in customers" :key="c.id">
+                <option :value="c.id" x-text="c.email+' ('+c.tier+')'"></option>
+              </template>
+            </select>
+          </div>
+
+          <template x-if="currentSession">
+            <div class="flex flex-col gap-1 ml-auto">
+              <label class="text-xs font-medium text-surface-400 uppercase tracking-wide">Session</label>
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="mono text-xs text-surface-500" x-text="currentSession.session_id.slice(0,12)+'…'"></span>
+                <span class="px-2 py-0.5 rounded-full text-xs font-medium"
+                  :class="currentSession.outcome==='resolved' ? 'status-resolved'
+                    : currentSession.outcome==='escalated' ? 'status-escalated' : 'status-active'"
+                  x-text="currentSession.outcome||'active'"></span>
+                <span class="text-xs text-surface-400" x-text="currentSession.turn_count+' turn(s)'"></span>
+              </div>
+            </div>
+          </template>
+
+          <div class="flex flex-col gap-1">
+            <label class="text-xs font-medium text-surface-400 uppercase tracking-wide">Actions</label>
+            <div class="flex gap-2">
+              <button @click="startSession()" :disabled="isLoading"
+                class="px-3 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                x-text="currentSession ? 'New Session' : 'Start Session'"></button>
+              <template x-if="currentSession">
+                <button @click="resetDemo()"
+                  class="px-3 py-2 bg-surface-100 hover:bg-surface-200 dark:bg-surface-700 dark:hover:bg-surface-600 text-surface-700 dark:text-surface-200 rounded-lg text-sm transition-colors">Reset</button>
+              </template>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Chat + context layout -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- LEFT: Chat -->
+        <div class="lg:col-span-2 flex flex-col gap-4">
+
+          <!-- Intent/latency strip -->
+          <template x-if="lastResponse">
+            <div class="flex flex-wrap items-center gap-4 slide-enter">
+              <div class="flex items-center gap-1.5">
+                <span class="text-xs font-medium text-surface-400 uppercase tracking-wide">Intent</span>
+                <span class="mono text-xs px-2 py-1 bg-surface-100 dark:bg-surface-700 rounded text-surface-600 dark:text-surface-300"
+                  x-text="lastResponse.intent||'—'"></span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span class="text-xs font-medium text-surface-400 uppercase tracking-wide">Status</span>
+                <span class="px-2 py-1 rounded text-xs font-medium"
+                  :class="lastResponse.is_resolved ? 'status-resolved'
+                    : lastResponse.is_escalated ? 'status-escalated' : 'status-active'"
+                  x-text="lastResponse.is_resolved ? 'RESOLVED ✓'
+                    : lastResponse.is_escalated ? 'ESCALATED → L2' : 'Active'"></span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span class="text-xs font-medium text-surface-400 uppercase tracking-wide">Latency</span>
+                <span class="mono text-xs text-surface-400" x-text="(lastResponse.latency_ms||0).toFixed(0)+'ms'"></span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span class="text-xs font-medium text-surface-400 uppercase tracking-wide">Turn</span>
+                <span class="mono text-xs text-surface-400" x-text="'#'+(lastResponse.turn_count||1)"></span>
+              </div>
+            </div>
+          </template>
+
+          <!-- Chat card -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 flex flex-col"
+            style="min-height:480px; max-height:600px;">
+
+            <div class="px-4 py-3 border-b border-surface-100 dark:border-surface-700 flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span class="brand-dot"></span>
+                <span class="text-sm font-medium" x-text="getBrandName(selectedBrand)"></span>
+                <span class="text-xs text-surface-400 capitalize" x-text="selectedChannel"></span>
+              </div>
+              <template x-if="isLoading">
+                <div class="flex items-center gap-1.5 text-xs text-surface-400">
+                  <div class="flex gap-0.5">
+                    <div class="w-1 h-1 rounded-full bg-surface-400 typing-dot"></div>
+                    <div class="w-1 h-1 rounded-full bg-surface-400 typing-dot"></div>
+                    <div class="w-1 h-1 rounded-full bg-surface-400 typing-dot"></div>
+                  </div>
+                  <span>Thinking…</span>
+                </div>
+              </template>
+              <template x-if="!currentSession && !isLoading">
+                <span class="text-xs text-surface-400">Start a session to begin</span>
+              </template>
+            </div>
+
+            <!-- Messages -->
+            <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-3" id="chat-msgs">
+              <template x-if="!messages.length && !currentSession">
+                <div class="flex-1 flex flex-col items-center justify-center text-surface-400 gap-3">
+                  <svg class="w-12 h-12 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                      d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                  </svg>
+                  <div class="text-center">
+                    <div class="font-medium">No active session</div>
+                    <div class="text-sm mt-1">Select a brand and click <strong>Start Session</strong></div>
+                  </div>
+                </div>
+              </template>
+              <template x-if="!messages.length && currentSession">
+                <div class="flex-1 flex flex-col items-center justify-center text-surface-400 gap-3">
+                  <svg class="w-10 h-10 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                      d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/>
+                  </svg>
+                  <div class="text-center text-sm">
+                    <div class="font-medium">Session active</div>
+                    <div class="text-xs mt-1">Send a message to begin the support flow</div>
+                  </div>
+                </div>
+              </template>
+              <template x-for="(msg,idx) in messages" :key="idx">
+                <div class="slide-enter"
+                  :class="msg.role==='user' ? 'msg-user flex justify-end'
+                    : msg.role==='agent' ? 'msg-agent flex justify-start'
+                    : 'flex justify-center'">
+                  <template x-if="msg.role==='system'">
+                    <div class="max-w-xl">
+                      <div class="bubble px-4 py-2 text-center">
+                        <div class="font-medium text-xs mb-0.5" x-text="msg.title"></div>
+                        <div class="text-xs opacity-80" x-text="msg.content"></div>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="msg.role!=='system'">
+                    <div class="max-w-xl">
+                      <div class="flex items-center gap-2 px-1 mb-1">
+                        <span class="text-xs text-surface-400"
+                          x-text="msg.role==='user' ? 'You' : 'L1 Agent'"></span>
+                        <span class="text-xs text-surface-300 dark:text-surface-600"
+                          x-text="msg.time||''"></span>
+                        <template x-if="msg.intent">
+                          <span class="mono text-xs px-1.5 py-0.5 bg-surface-100 dark:bg-surface-700 rounded text-surface-400"
+                            x-text="msg.intent"></span>
+                        </template>
+                      </div>
+                      <div class="bubble px-4 py-3 whitespace-pre-wrap text-sm leading-relaxed"
+                        x-html="formatMsg(msg.content, msg.role)"></div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+              <div id="chat-bottom"></div>
+            </div>
+
+            <!-- Input -->
+            <div class="p-4 border-t border-surface-100 dark:border-surface-700">
+              <form @submit.prevent="sendMessage()" class="flex gap-3">
+                <textarea x-model="chatInput"
+                  @keydown.enter.exact.prevent="sendMessage()"
+                  placeholder="Describe your issue… (e.g. 'Where is my order?')"
+                  rows="1"
+                  class="flex-1 resize-none rounded-xl border border-surface-200 dark:border-surface-600 bg-surface-50 dark:bg-surface-900 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 placeholder:text-surface-300 disabled:opacity-50"
+                  :disabled="!currentSession||isLoading"></textarea>
+                <button type="submit"
+                  :disabled="!chatInput.trim()||!currentSession||isLoading"
+                  class="self-end px-4 py-3 bg-brand-600 hover:bg-brand-700 disabled:bg-surface-200 text-white rounded-xl text-sm font-medium transition-colors flex items-center gap-2">
+                  <svg x-show="!isLoading" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                  </svg>
+                  <span x-text="isLoading ? 'Sending…' : 'Send'"></span>
+                </button>
+              </form>
+              <div class="mt-2 flex flex-wrap gap-2">
+                <template x-for="c in quickChips" :key="c.text">
+                  <button @click="sendQuick(c.text)"
+                    :disabled="!currentSession||isLoading"
+                    class="text-xs px-2.5 py-1 rounded-full border border-surface-200 dark:border-surface-600 hover:border-brand-400 hover:text-brand-600 dark:hover:text-brand-400 transition-colors disabled:opacity-40"
+                    x-text="c.text"></button>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- Escalation banner -->
+          <template x-if="lastResponse && lastResponse.is_escalated">
+            <div class="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-xl p-4 slide-enter">
+              <div class="flex items-start gap-3">
+                <div class="w-8 h-8 rounded-full bg-amber-100 dark:bg-amber-900 flex items-center justify-center flex-shrink-0">
+                  <svg class="w-4 h-4 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                  </svg>
+                </div>
+                <div class="flex-1">
+                  <div class="font-medium text-amber-800 dark:text-amber-200 text-sm mb-1">Session Escalated to Level 2 Support</div>
+                  <div class="text-xs text-amber-700 dark:text-amber-300 mb-3">Query could not be resolved automatically. A human agent will review in Chatwoot.</div>
+                  <div class="flex flex-wrap gap-2 items-center">
+                    <span class="mono text-xs bg-amber-100 dark:bg-amber-900 px-2 py-1 rounded text-amber-700 dark:text-amber-300"
+                      x-text="'Ticket: '+(lastResponse.escalation_ticket||'L2-'+Date.now().toString(36).toUpperCase())"></span>
+                    <span class="text-xs text-amber-600 dark:text-amber-400"
+                      x-text="lastResponse.turn_count+' turn(s) • '+((lastResponse.latency_ms||0)/1000).toFixed(1)+'s'"></span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Resolved banner -->
+          <template x-if="lastResponse && lastResponse.is_resolved">
+            <div class="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded-xl p-4 slide-enter">
+              <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-full bg-green-100 dark:bg-green-900 flex items-center justify-center flex-shrink-0">
+                  <svg class="w-4 h-4 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                  </svg>
+                </div>
+                <div>
+                  <div class="font-medium text-green-800 dark:text-green-200 text-sm">Issue Resolved Automatically</div>
+                  <div class="text-xs text-green-700 dark:text-green-300 mt-0.5">Fully resolved by L1 AI without human intervention.</div>
+                </div>
+              </div>
+            </div>
+          </template>
+
+        </div><!-- /chat -->
+
+        <!-- RIGHT: Context panel -->
+        <div class="flex flex-col gap-4">
+
+          <!-- Customer context -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+            <div class="px-4 py-3 border-b border-surface-100 dark:border-surface-700 flex items-center justify-between">
+              <span class="text-sm font-semibold">Customer Context</span>
+              <span class="w-2 h-2 rounded-full animate-pulse bg-brand-500"></span>
+            </div>
+            <div class="p-4">
+              <template x-if="!customerContext">
+                <div class="text-center text-surface-400 text-sm py-4">
+                  <div>No customer loaded</div>
+                  <div class="text-xs mt-1">Select a customer above</div>
+                </div>
+              </template>
+              <template x-if="customerContext">
+                <div class="flex flex-col gap-3">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                      <div class="w-8 h-8 rounded-full bg-brand-100 dark:bg-brand-900 flex items-center justify-center text-brand-700 dark:text-brand-300 text-xs font-bold"
+                        x-text="(customerContext.email||'?')[0].toUpperCase()"></div>
+                      <div>
+                        <div class="text-sm font-medium" x-text="customerContext.email||'—'"></div>
+                        <div class="mono text-xs text-surface-400" x-text="customerContext.id||''"></div>
+                      </div>
+                    </div>
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium uppercase"
+                      :class="customerContext.tier==='vip'?'chip-brand':customerContext.tier==='loyalty'?'chip-info':'chip-inactive'"
+                      x-text="customerContext.tier||'standard'"></span>
+                  </div>
+                  <div class="grid grid-cols-2 gap-2 text-xs">
+                    <div class="bg-surface-50 dark:bg-surface-900 rounded-lg p-2">
+                      <div class="text-surface-400">Total Orders</div>
+                      <div class="font-semibold text-sm mt-0.5" x-text="customerContext.total_orders||0"></div>
+                    </div>
+                    <div class="bg-surface-50 dark:bg-surface-900 rounded-lg p-2">
+                      <div class="text-surface-400">Open Returns</div>
+                      <div class="font-semibold text-sm mt-0.5" x-text="customerContext.open_returns?.length||0"></div>
+                    </div>
+                  </div>
+                  <template x-if="customerContext.recent_orders?.length">
+                    <div>
+                      <div class="text-xs font-medium text-surface-400 uppercase tracking-wide mb-2">Latest Order</div>
+                      <template x-for="order in customerContext.recent_orders.slice(0,1)" :key="order.id">
+                        <div class="bg-surface-50 dark:bg-surface-900 rounded-lg p-3 space-y-1.5">
+                          <div class="flex items-center justify-between">
+                            <span class="mono text-xs font-medium" x-text="order.id"></span>
+                            <span class="px-1.5 py-0.5 rounded text-xs font-medium status-active"
+                              x-text="(order.status||'').replace('_',' ')"></span>
+                          </div>
+                          <div class="flex items-center justify-between text-xs text-surface-400">
+                            <span x-text="(order.currency||'GBP')+' '+(order.total_value||0)"></span>
+                            <span x-text="(order.items?.length||0)+' item(s)'"></span>
+                          </div>
+                          <template x-if="order.shipment?.tracking_id">
+                            <div class="flex items-center gap-1.5 text-xs text-surface-500">
+                              <svg class="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+                              </svg>
+                              <span x-text="order.shipment.carrier+': '+order.shipment.tracking_id"></span>
+                            </div>
+                          </template>
+                          <template x-if="order.shipment?.current_status">
+                            <div class="text-xs text-surface-400" x-text="order.shipment.current_status"></div>
+                          </template>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- L1 Flow -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+            <div class="px-4 py-3 border-b border-surface-100 dark:border-surface-700">
+              <span class="text-sm font-semibold">L1 Support Flow</span>
+            </div>
+            <div class="p-4 space-y-3">
+              <template x-for="(step,i) in flowSteps" :key="step.label">
+                <div class="flex items-start gap-3">
+                  <div class="flex flex-col items-center">
+                    <div class="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold"
+                      :class="step.done?'bg-green-500 text-white':step.active?'bg-brand-600 text-white':'bg-surface-100 dark:bg-surface-700 text-surface-400'">
+                      <template x-if="step.done">
+                        <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
+                        </svg>
+                      </template>
+                      <template x-if="!step.done"><span x-text="i+1"></span></template>
+                    </div>
+                    <template x-if="i<flowSteps.length-1">
+                      <div class="w-px flex-1 my-1"
+                        :class="step.done?'bg-green-400':'bg-surface-200 dark:bg-surface-600'"></div>
+                    </template>
+                  </div>
+                  <div class="flex-1 pb-3">
+                    <div class="text-sm font-medium" :class="step.active?'text-brand-600':''" x-text="step.label"></div>
+                    <div class="text-xs text-surface-400 mt-0.5" x-text="step.desc"></div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Escalation triggers -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+            <div class="px-4 py-3 border-b border-surface-100 dark:border-surface-700 flex items-center gap-2">
+              <span class="text-sm font-semibold">Escalation Triggers</span>
+              <span class="chip" style="background:#fee2e2;color:#991b1b">L2</span>
+            </div>
+            <div class="p-4 space-y-2">
+              <template x-for="rule in escalationRules" :key="rule.condition">
+                <div class="flex items-start gap-2">
+                  <div class="w-5 h-5 rounded border flex items-center justify-center flex-shrink-0 mt-0.5"
+                    :class="rule.active?'bg-red-100 border-red-300':'bg-surface-50 border-surface-200'">
+                    <svg x-show="rule.active" class="w-3 h-3 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                  </div>
+                  <div class="text-xs">
+                    <div class="font-medium text-surface-700 dark:text-surface-300" x-text="rule.condition"></div>
+                    <div class="text-surface-400 mt-0.5" x-text="rule.action"></div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+
+        </div><!-- /context panel -->
+      </div><!-- /grid -->
+    </div><!-- /demo tab -->
+
+    <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  2 · SESSIONS                ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='sessions'" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+
+      <!-- Section sub-nav -->
+      <div class="flex flex-wrap gap-2 mb-6">
+        <template x-for="s in sessionsSubTabs" :key="s.id">
+          <button @click="sessTab=s.id"
+            :class="sessTab===s.id?'subtab-active':'subtab-inactive'"
+            class="subtab" x-text="s.label"></button>
+        </template>
+      </div>
+
+      <!-- Active sessions list -->
+      <div x-show="sessTab==='list'">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="text-lg font-semibold">Active Sessions</h2>
+            <p class="text-sm text-surface-400">Live support sessions across all brands</p>
+          </div>
+          <button @click="refreshSessions()"
+            class="px-3 py-2 bg-white dark:bg-surface-800 border border-surface-200 dark:border-surface-700 rounded-lg text-sm hover:bg-surface-50 dark:hover:bg-surface-700 flex items-center gap-2 transition-colors">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+            Refresh
+          </button>
+        </div>
+
+        <!-- Brand filter -->
+        <div class="flex gap-3 mb-4 flex-wrap">
+          <button @click="sessBrandFilter=''" :class="!sessBrandFilter?'subtab-active':'subtab-inactive'" class="subtab">All Brands</button>
+          <template x-for="b in brands" :key="b.brand_id">
+            <button @click="sessBrandFilter=b.brand_id" :class="sessBrandFilter===b.brand_id?'subtab-active':'subtab-inactive'" class="subtab" x-text="b.name"></button>
+          </template>
+        </div>
+
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-surface-50 dark:bg-surface-900 border-b border-surface-200 dark:border-surface-700">
+              <tr>
+                <th class="text-left px-4 py-3 text-xs font-medium text-surface-400 uppercase">Session ID</th>
+                <th class="text-left px-4 py-3 text-xs font-medium text-surface-400 uppercase">Brand</th>
+                <th class="text-left px-4 py-3 text-xs font-medium text-surface-400 uppercase">Channel</th>
+                <th class="text-center px-4 py-3 text-xs font-medium text-surface-400 uppercase">Turns</th>
+                <th class="text-left px-4 py-3 text-xs font-medium text-surface-400 uppercase">Outcome</th>
+                <th class="text-left px-4 py-3 text-xs font-medium text-surface-400 uppercase">Created</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-surface-100 dark:divide-surface-700">
+              <template x-if="!filteredSessions.length">
+                <tr><td colspan="6" class="px-4 py-8 text-center text-surface-400">No sessions found</td></tr>
+              </template>
+              <template x-for="s in filteredSessions" :key="s.session_id">
+                <tr class="hover:bg-surface-50 dark:hover:bg-surface-900 transition-colors cursor-pointer"
+                  @click="openSessionDetail(s.session_id)">
+                  <td class="px-4 py-3"><span class="mono text-xs" x-text="s.session_id"></span></td>
+                  <td class="px-4 py-3">
+                    <div class="flex items-center gap-1.5">
+                      <span class="brand-dot"></span>
+                      <span x-text="s.brand_id"></span>
+                    </div>
+                  </td>
+                  <td class="px-4 py-3 text-surface-500 capitalize" x-text="s.channel||'chat'"></td>
+                  <td class="px-4 py-3 text-center" x-text="s.turn_count||0"></td>
+                  <td class="px-4 py-3">
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium"
+                      :class="s.outcome==='resolved'?'status-resolved':s.outcome==='escalated'?'status-escalated':'status-active'"
+                      x-text="s.outcome||'active'"></span>
+                  </td>
+                  <td class="px-4 py-3 text-surface-400 text-xs" x-text="s.created_at?new Date(s.created_at).toLocaleString():'—'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Session detail -->
+      <div x-show="sessTab==='detail'">
+        <div class="flex items-center gap-3 mb-4">
+          <button @click="sessTab='list'" class="px-3 py-2 bg-surface-100 dark:bg-surface-700 rounded-lg text-sm hover:bg-surface-200 dark:hover:bg-surface-600 flex items-center gap-2 transition-colors">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+            </svg>
+            Back
+          </button>
+          <span class="text-sm font-medium text-surface-500">Session Detail</span>
+          <span class="mono text-xs text-surface-400" x-text="selectedSessId"></span>
+        </div>
+
+        <div x-show="sessionDetail">
+          <!-- Metadata -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 p-4 mb-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+            <div>
+              <div class="text-surface-400">Brand</div>
+              <div class="font-medium mt-0.5" x-text="sessionDetail.brand_id||'—'"></div>
+            </div>
+            <div>
+              <div class="text-surface-400">Channel</div>
+              <div class="font-medium mt-0.5 capitalize" x-text="sessionDetail.channel||'—'"></div>
+            </div>
+            <div>
+              <div class="text-surface-400">Turns</div>
+              <div class="font-medium mt-0.5" x-text="sessionDetail.turn_count||0"></div>
+            </div>
+            <div>
+              <div class="text-surface-400">Outcome</div>
+              <div class="mt-0.5">
+                <span class="px-2 py-0.5 rounded-full text-xs font-medium"
+                  :class="sessionDetail.outcome==='resolved'?'status-resolved':sessionDetail.outcome==='escalated'?'status-escalated':'status-active'"
+                  x-text="sessionDetail.outcome||'active'"></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Messages -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 p-4">
+            <div class="text-sm font-semibold mb-4">Conversation History</div>
+            <div class="flex flex-col gap-3 max-h-96 overflow-y-auto">
+              <template x-for="(m,idx) in (sessionDetail.messages||[])" :key="idx">
+                <div class="flex flex-col gap-0.5"
+                  :class="m.role==='user'?'items-end':'items-start'">
+                  <div class="text-xs text-surface-400 px-1" x-text="m.role==='user'?'Customer':'Agent'"></div>
+                  <div class="bubble px-4 py-3 text-sm whitespace-pre-wrap"
+                    :class="m.role==='user'?'msg-user':'msg-agent'"
+                    x-text="m.content||''"></div>
+                </div>
+              </template>
+              <template x-if="!sessionDetail.messages?.length">
+                <div class="text-center text-surface-400 text-sm py-4">No messages in this session</div>
+              </template>
+            </div>
+          </div>
+        </div>
+        <div x-show="!sessionDetail" class="text-center text-surface-400 py-12">Loading…</div>
+      </div>
+    </div><!-- /sessions -->
+
+    <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  3 · MONITORING               ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='monitoring'" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+
+      <!-- Section sub-nav -->
+      <div class="flex flex-wrap gap-2 mb-6">
+        <template x-for="s in monSubTabs" :key="s.id">
+          <button @click="monTab=s.id"
+            :class="monTab===s.id?'subtab-active':'subtab-inactive'"
+            class="subtab" x-text="s.label"></button>
+        </template>
+      </div>
+
+      <!-- Overview sub-tab -->
+      <div x-show="monTab==='overview'">
+        <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4 mb-8">
+          <template x-for="svc in services" :key="svc.name">
+            <div class="metric-card bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 p-4">
+              <div class="flex items-center justify-between mb-2">
+                <span class="w-2 h-2 rounded-full"
+                  :class="svc.status==='up'?'bg-green-500':svc.status==='degraded'?'bg-yellow-500':'bg-red-500'"></span>
+                <span class="text-xs text-surface-400" x-text="svc.type"></span>
+              </div>
+              <div class="text-sm font-semibold" x-text="svc.name"></div>
+              <div class="text-xs text-surface-400 mt-0.5" x-text="svc.detail||''"></div>
+            </div>
+          </template>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+          <template x-for="m in metrics" :key="m.label">
+            <div class="metric-card bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 p-5">
+              <div class="text-xs font-medium text-surface-400 uppercase tracking-wide" x-text="m.label"></div>
+              <div class="text-2xl font-bold mt-1" x-text="m.value"></div>
+              <div class="text-xs text-surface-400 mt-1" x-text="m.sub||''"></div>
+            </div>
+          </template>
+        </div>
+
+        <!-- Graph + Relationships -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+            <div class="px-4 py-3 border-b border-surface-100 dark:border-surface-700 flex items-center justify-between">
+              <span class="text-sm font-semibold">Knowledge Graph — Nodes</span>
+              <button @click="refreshMonitoring()" class="text-xs text-brand-600 hover:text-brand-700">Refresh</button>
+            </div>
+            <div class="p-4">
+              <template x-if="!graphStats.nodes?.length">
+                <div class="flex items-center justify-center h-40 text-surface-400 text-sm">
+                  Graph not connected — check FalkorDB
+                </div>
+              </template>
+              <div class="space-y-2">
+                <template x-for="n in (graphStats.nodes||[])" :key="n.label">
+                  <div class="flex items-center gap-3">
+                    <span class="mono text-xs text-surface-500 w-32 truncate" x-text="n.label||'?'"></span>
+                    <div class="flex-1 bg-surface-100 dark:bg-surface-900 rounded-full h-2 overflow-hidden">
+                      <div class="h-full bg-brand-500 rounded-full graph-bar"
+                        :style="'width:'+Math.min(100,(n.count/(graphStats.maxCount||1))*100)+'%'"></div>
+                    </div>
+                    <span class="mono text-xs text-surface-500 w-8 text-right" x-text="n.count||0"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+            <div class="px-4 py-3 border-b border-surface-100 dark:border-surface-700">
+              <span class="text-sm font-semibold">Relationships</span>
+            </div>
+            <div class="p-4">
+              <template x-if="!graphStats.relationships?.length">
+                <div class="flex items-center justify-center h-40 text-surface-400 text-sm">No data</div>
+              </template>
+              <div class="flex flex-wrap gap-2">
+                <template x-for="r in (graphStats.relationships||[])" :key="r.type">
+                  <span class="mono text-xs px-2 py-1 bg-surface-50 dark:bg-surface-900 rounded border border-surface-200 dark:border-surface-600">
+                    <span x-text="r.type||''"></span>
+                    <span class="text-surface-400 ml-1" x-text="'×'+(r.count||0)"></span>
+                  </span>
+                </template>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Intent distribution -->
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+          <div class="px-4 py-3 border-b border-surface-100 dark:border-surface-700 flex items-center justify-between">
+            <span class="text-sm font-semibold">Intent Distribution</span>
+            <span class="text-xs text-surface-400">Live</span>
+          </div>
+          <div class="p-4">
+            <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+              <template x-for="i in intentDist" :key="i.name">
+                <div class="text-center p-3 bg-surface-50 dark:bg-surface-900 rounded-lg">
+                  <div class="text-xl font-bold text-brand-600" x-text="i.count||0"></div>
+                  <div class="text-xs text-surface-500 mt-1" x-text="i.name||''"></div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Jobs sub-tab -->
+      <div x-show="monTab==='jobs'">
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="text-lg font-semibold">Ingestion Jobs</h2>
+            <p class="text-sm text-surface-400">Scheduled and running crawl-to-graph jobs</p>
+          </div>
+          <button @click="refreshJobs()" class="px-3 py-2 bg-white dark:bg-surface-800 border border-surface-200 rounded-lg text-sm hover:bg-surface-50 flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+            Refresh
+          </button>
+        </div>
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 overflow-hidden">
+          <table class="w-full text-sm">
+            <thead class="bg-surface-50 dark:bg-surface-900 border-b border-surface-200">
+              <tr>
+                <th class="text-left px-4 py-3 text-xs font-medium text-surface-400 uppercase">Brand</th>
+                <th class="text-left px-4 py-3 text-xs font-medium text-surface-400 uppercase">Schedule</th>
+                <th class="text-left px-4 py-3 text-xs font-medium text-surface-400 uppercase">Status</th>
+                <th class="text-left px-4 py-3 text-xs font-medium text-surface-400 uppercase">Last Run</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-surface-100">
+              <template x-if="!ingestionJobs.length">
+                <tr><td colspan="4" class="px-4 py-8 text-center text-surface-400">
+                  No scheduled jobs. <button @click="triggerIngest()" class="text-brand-600">Trigger now</button>
+                </td></tr>
+              </template>
+              <template x-for="j in ingestionJobs" :key="j.brand_id">
+                <tr class="hover:bg-surface-50 transition-colors">
+                  <td class="px-4 py-3"><div class="flex items-center gap-1.5"><span class="brand-dot"></span><span x-text="j.brand_id"></span></div></td>
+                  <td class="px-4 py-3 mono text-xs text-surface-500" x-text="j.schedule||'—'"></td>
+                  <td class="px-4 py-3">
+                    <span class="px-2 py-0.5 rounded-full text-xs font-medium status-active" x-text="j.status||'idle'"></span>
+                  </td>
+                  <td class="px-4 py-3 text-surface-400 text-xs" x-text="j.last_run?new Date(j.last_run).toLocaleString():'Never'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div><!-- /monitoring -->
+
+    <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  4 · BRANDS                  ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='brands'" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+
+      <!-- Section sub-nav -->
+      <div class="flex flex-wrap gap-2 mb-6">
+        <template x-for="s in brandSubTabs" :key="s.id">
+          <button @click="brandTab=s.id"
+            :class="brandTab===s.id?'subtab-active':'subtab-inactive'"
+            class="subtab" x-text="s.label"></button>
+        </template>
+      </div>
+
+      <!-- List sub-tab -->
+      <div x-show="brandTab==='list'">
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+          <template x-for="b in brands" :key="b.brand_id">
+            <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 p-4 hover:border-brand-300 transition-colors">
+              <div class="flex items-center gap-2 mb-3">
+                <span class="brand-dot"></span>
+                <span class="text-sm font-semibold" x-text="b.name"></span>
+              </div>
+              <div class="space-y-1 text-xs text-surface-400">
+                <div class="mono" x-text="b.brand_id"></div>
+                <div x-text="'Region: '+(b.default_region||'UK')"></div>
+                <div x-text="(b.locales||[]).join(', ')"></div>
+              </div>
+              <div class="mt-3 flex gap-2 flex-wrap">
+                <button @click="selectBrandForMgmt(b.brand_id)"
+                  class="px-2 py-1 text-xs bg-brand-50 dark:bg-brand-900 text-brand-700 dark:text-brand-300 rounded hover:bg-brand-100 transition-colors">Manage</button>
+                <button @click="probeBrand(b.brand_id)"
+                  class="px-2 py-1 text-xs bg-surface-100 dark:bg-surface-700 rounded hover:bg-surface-200 transition-colors">Probe</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Manage sub-tab -->
+      <div x-show="brandTab==='manage'">
+        <div class="flex items-center gap-3 mb-4">
+          <button @click="brandTab='list'" class="px-3 py-2 bg-surface-100 dark:bg-surface-700 rounded-lg text-sm hover:bg-surface-200 flex items-center gap-2">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+            </svg>
+            Back
+          </button>
+          <div class="flex flex-col gap-1">
+            <label class="text-xs font-medium text-surface-400 uppercase tracking-wide">Select Brand</label>
+            <select x-model="mgmtBrandId" @change="selectBrandForMgmt(mgmtBrandId)"
+              class="pl-3 pr-8 py-2 rounded-lg border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+              <option value="">— Choose a brand —</option>
+              <template x-for="b in brands" :key="b.brand_id">
+                <option :value="b.brand_id" x-text="b.name+' ('+b.brand_id+')'"></option>
+              </template>
+            </select>
+          </div>
+          <template x-if="mgmtBrandId">
+            <div class="ml-auto flex items-center gap-2">
+              <span class="brand-dot"></span>
+              <span class="text-sm font-medium" x-text="getBrandName(mgmtBrandId)"></span>
+            </div>
+          </template>
+        </div>
+
+        <!-- Empty state: no brand selected -->
+        <template x-if="!mgmtBrandId">
+          <div class="flex flex-col items-center justify-center py-20 text-surface-400 gap-4">
+            <svg class="w-16 h-16 opacity-25" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+                d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4"/>
+            </svg>
+            <div class="text-center">
+              <div class="font-medium text-surface-600 dark:text-surface-300">No brand selected</div>
+              <div class="text-sm mt-1">Choose a brand above to manage data collection, probing, and more.</div>
+            </div>
+          </div>
+        </template>
+
+        <template x-if="mgmtBrandId">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          <!-- Data collection -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+            <div class="px-4 py-3 border-b border-surface-100">
+              <span class="text-sm font-semibold">Data Collection</span>
+            </div>
+            <div class="p-4 space-y-4">
+
+              <div>
+                <div class="text-xs font-medium text-surface-400 uppercase mb-2">Trigger Crawl</div>
+                <div class="flex items-center gap-3 flex-wrap">
+                  <div class="flex flex-col gap-1">
+                    <label class="text-xs text-surface-400">Max URLs</label>
+                    <input type="number" x-model="collectMaxUrls" min="10" max="500"
+                      class="w-24 text-sm rounded border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 px-2 py-1"/>
+                  </div>
+                  <div class="flex flex-col gap-1">
+                    <label class="text-xs text-surface-400">Concurrency</label>
+                    <input type="number" x-model="collectConcurrency" min="1" max="10"
+                      class="w-20 text-sm rounded border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 px-2 py-1"/>
+                  </div>
+                  <button @click="triggerCollect()"
+                    :disabled="collectLoading"
+                    class="self-end px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50">
+                    <span x-text="collectLoading?'Collecting…':'Start Collection'"></span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Collection status -->
+              <div>
+                <div class="text-xs font-medium text-surface-400 uppercase mb-2">Collection Status</div>
+                <button @click="loadCollectStatus()"
+                  class="px-3 py-1.5 text-xs bg-surface-100 dark:bg-surface-700 rounded hover:bg-surface-200 transition-colors mb-2">
+                  Refresh Status
+                </button>
+                <template x-if="collectStatus">
+                  <div class="space-y-2 text-xs">
+                    <div class="grid grid-cols-3 gap-2">
+                      <div class="bg-surface-50 dark:bg-surface-900 rounded p-2">
+                        <div class="text-surface-400">Phase</div>
+                        <div class="font-medium mt-0.5" x-text="collectStatus.phase||'—'"></div>
+                      </div>
+                      <div class="bg-surface-50 dark:bg-surface-900 rounded p-2">
+                        <div class="text-surface-400">Pages Visited</div>
+                        <div class="font-medium mt-0.5" x-text="collectStatus.pages_visited||0"></div>
+                      </div>
+                      <div class="bg-surface-50 dark:bg-surface-900 rounded p-2">
+                        <div class="text-surface-400">Facts Extracted</div>
+                        <div class="font-medium mt-0.5" x-text="collectStatus.extracted_count||0"></div>
+                      </div>
+                    </div>
+                    <template x-if="collectStatus.errors?.length">
+                      <div class="bg-red-50 dark:bg-red-900/20 rounded p-2 border border-red-200">
+                        <div class="font-medium text-red-700 mb-1">Errors</div>
+                        <template x-for="e in collectStatus.errors" :key="e">
+                          <div class="text-red-600 text-xs" x-text="e"></div>
+                        </template>
+                      </div>
+                    </template>
+                    <template x-if="collectStatus.ontology_proposals?.length">
+                      <div class="bg-yellow-50 dark:bg-yellow-900/20 rounded p-2 border border-yellow-200">
+                        <div class="font-medium text-yellow-700 mb-1">Ontology Proposals: <span x-text="collectStatus.ontology_proposals.length"></span></div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- Probe results -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+            <div class="px-4 py-3 border-b border-surface-100 flex items-center justify-between">
+              <span class="text-sm font-semibold">Site Probe</span>
+              <button @click="probeBrand(mgmtBrandId)"
+                class="px-3 py-1 text-xs bg-surface-100 dark:bg-surface-700 rounded hover:bg-surface-200">Re-probe</button>
+            </div>
+            <div class="p-4">
+              <template x-if="!probeResult">
+                <div class="text-center text-surface-400 text-sm py-6">
+                  Click <strong>Probe</strong> on a brand to check bot protection
+                </div>
+              </template>
+              <template x-if="probeResult">
+                <div class="space-y-3 text-xs">
+                  <div class="flex items-center justify-between py-1.5 border-b border-surface-100">
+                    <span class="text-surface-400">Plain HTTP</span>
+                    <span class="px-2 py-0.5 rounded text-xs" :class="probeResult.plain_httpx?'chip-resolved':'chip-escalated'"
+                      x-text="probeResult.plain_httpx?'Works':'Blocked'"></span>
+                  </div>
+                  <div class="flex items-center justify-between py-1.5 border-b border-surface-100">
+                    <span class="text-surface-400">Content Rich</span>
+                    <span class="px-2 py-0.5 rounded text-xs" :class="probeResult.content_rich?'chip-resolved':'chip-pending'"
+                      x-text="probeResult.content_rich?'Yes':'No'"></span>
+                  </div>
+                  <div class="flex items-center justify-between py-1.5 border-b border-surface-100">
+                    <span class="text-surface-400">Bot Protected</span>
+                    <span class="px-2 py-0.5 rounded text-xs" :class="probeResult.bot_protected?'chip-escalated':'chip-resolved'"
+                      x-text="probeResult.bot_protected?'Yes':'No'"></span>
+                  </div>
+                  <div class="flex items-center justify-between py-1.5 border-b border-surface-100">
+                    <span class="text-surface-400">FireCrawl Available</span>
+                    <span class="px-2 py-0.5 rounded text-xs" :class="probeResult.firecrawl_available?'chip-resolved':'chip-pending'"
+                      x-text="probeResult.firecrawl_available?'Yes':'No'"></span>
+                  </div>
+                  <div class="flex items-center justify-between py-1.5">
+                    <span class="text-surface-400">Recommended Strategy</span>
+                    <span class="px-2 py-0.5 rounded text-xs font-medium bg-brand-50 text-brand-700"
+                      x-text="probeResult.recommended_strategy||'—'"></span>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Brand ontology / subgraph -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 lg:col-span-2">
+            <div class="px-4 py-3 border-b border-surface-100 flex items-center justify-between">
+              <span class="text-sm font-semibold">Brand Knowledge Graph</span>
+              <button @click="loadBrandOntology(mgmtBrandId)"
+                class="px-3 py-1 text-xs bg-surface-100 dark:bg-surface-700 rounded hover:bg-surface-200">Load</button>
+            </div>
+            <div class="p-4">
+              <template x-if="!brandOntology">
+                <div class="text-center text-surface-400 text-sm py-6">Select a brand and click <strong>Load</strong></div>
+              </template>
+              <template x-if="brandOntology">
+                <div class="space-y-4">
+                  <template x-if="brandOntology.policies?.length">
+                    <div>
+                      <div class="text-xs font-medium text-surface-400 uppercase mb-2">Policies</div>
+                      <div class="flex flex-wrap gap-2">
+                        <template x-for="p in brandOntology.policies" :key="p.title">
+                          <span class="chip" x-text="(p.type||'')+': '+(p.title||'—')"></span>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="brandOntology.issue_types?.length">
+                    <div>
+                      <div class="text-xs font-medium text-surface-400 uppercase mb-2">Issue Types</div>
+                      <div class="flex flex-wrap gap-2">
+                        <template x-for="it in brandOntology.issue_types" :key="it.issue">
+                          <span class="mono text-xs px-2 py-1 bg-surface-50 dark:bg-surface-900 rounded border border-surface-200"
+                            x-text="it.issue"></span>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="brandOntology.sample_faqs?.length">
+                    <div>
+                      <div class="text-xs font-medium text-surface-400 uppercase mb-2">Sample FAQs</div>
+                      <div class="space-y-1">
+                        <template x-for="f in brandOntology.sample_faqs.slice(0,5)" :key="f.question">
+                          <div class="text-xs p-2 bg-surface-50 dark:bg-surface-900 rounded"
+                            x-text="f.question"></div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="!brandOntology.policies?.length && !brandOntology.issue_types?.length && !brandOntology.sample_faqs?.length">
+                    <div class="text-center text-surface-400 text-sm py-4">No data found for this brand</div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <!-- Demo data seeder -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+            <div class="px-4 py-3 border-b border-surface-100">
+              <span class="text-sm font-semibold">Demo Data</span>
+            </div>
+            <div class="p-4">
+              <p class="text-xs text-surface-400 mb-3">Seeds 6 customers (Standard/Loyalty/VIP), orders, returns, and promos for this brand.</p>
+              <button @click="seedDemoData(mgmtBrandId)"
+                :disabled="seedLoading"
+                class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium disabled:opacity-50 transition-colors">
+                <span x-text="seedLoading?'Seeding…':'Seed Demo Data'"></span>
+              </button>
+              <template x-if="seedResult">
+                <div class="mt-3 text-xs space-y-1">
+                  <div class="text-green-700" x-text="'✓ Seeded '+seedResult.summary?.customers+' customers'"></div>
+                  <div class="text-surface-500" x-text="'Customer IDs: '+(seedResult.summary?.customer_ids||[]).join(', ')"></div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </template>
+
+          <!-- Doc upload -->
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+            <div class="px-4 py-3 border-b border-surface-100">
+              <span class="text-sm font-semibold">Document Upload</span>
+            </div>
+            <div class="p-4 space-y-3">
+              <p class="text-xs text-surface-400">Upload PDF, DOCX, TXT, MD, HTML for ingestion into KB</p>
+              <input type="file" id="doc-upload" multiple accept=".pdf,.docx,.doc,.txt,.md,.html,.htm"
+                class="text-xs w-full"/>
+              <button @click="uploadDocs()"
+                :disabled="uploadLoading"
+                class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium disabled:opacity-50 transition-colors">
+                <span x-text="uploadLoading?'Uploading…':'Upload & Ingest'"></span>
+              </button>
+            </div>
+          </div>
+
+        </div>
+        </template>
+
+    </div><!-- /brands -->
+
+    <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  5 · GRAPH                   ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='graph'" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+
+      <div class="flex flex-wrap gap-2 mb-6">
+        <template x-for="s in graphSubTabs" :key="s.id">
+          <button @click="graphTab=s.id"
+            :class="graphTab===s.id?'subtab-active':'subtab-inactive'"
+            class="subtab" x-text="s.label"></button>
+        </template>
+      </div>
+
+      <!-- Summary -->
+      <div x-show="graphTab==='summary'">
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+          <template x-for="m in graphMetrics" :key="m.label">
+            <div class="metric-card bg-white dark:bg-surface-800 rounded-xl border border-surface-200 p-5">
+              <div class="text-xs font-medium text-surface-400 uppercase" x-text="m.label"></div>
+              <div class="text-2xl font-bold mt-1" x-text="m.value"></div>
+            </div>
+          </template>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+            <div class="px-4 py-3 border-b border-surface-100 flex items-center justify-between">
+              <span class="text-sm font-semibold">Node Distribution</span>
+              <button @click="loadGraphData()" class="text-xs text-brand-600">Refresh</button>
+            </div>
+            <div class="p-4">
+              <template x-if="!graphData.nodes?.length">
+                <div class="h-40 flex items-center justify-center text-surface-400 text-sm">
+                  Graph not connected
+                </div>
+              </template>
+              <div class="space-y-2">
+                <template x-for="n in graphData.nodes" :key="n.label">
+                  <div class="flex items-center gap-3">
+                    <span class="mono text-xs text-surface-500 w-32 truncate" x-text="n.label||'?'"></span>
+                    <div class="flex-1 bg-surface-100 dark:bg-surface-900 rounded-full h-2">
+                      <div class="h-full bg-brand-500 rounded-full graph-bar"
+                        :style="'width:'+Math.min(100,(n.count/(graphData.maxCount||1))*100)+'%'"></div>
+                    </div>
+                    <span class="mono text-xs text-surface-500 w-8 text-right" x-text="n.count||0"></span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+            <div class="px-4 py-3 border-b border-surface-100">
+              <span class="text-sm font-semibold">Relationships</span>
+            </div>
+            <div class="p-4">
+              <div class="flex flex-wrap gap-2">
+                <template x-for="r in graphData.rels" :key="r.type">
+                  <span class="mono text-xs px-2 py-1 bg-surface-50 dark:bg-surface-900 rounded border border-surface-200">
+                    <span x-text="r.type||''"></span>
+                    <span class="text-surface-400 ml-1" x-text="'×'+(r.count||0)"></span>
+                  </span>
+                </template>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Cypher Query -->
+      <div x-show="graphTab==='cypher'">
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100">
+            <span class="text-sm font-semibold">Raw Cypher Query</span>
+          </div>
+          <div class="p-4 space-y-4">
+            <div class="flex gap-2">
+              <input type="text" x-model="cypherQuery"
+                placeholder="MATCH (n:Brand) RETURN n LIMIT 5"
+                class="flex-1 text-sm rounded-lg border border-surface-200 dark:border-surface-600 bg-surface-50 dark:bg-surface-900 px-3 py-2 mono focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+              <button @click="runCypher()"
+                :disabled="cypherLoading"
+                class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium disabled:opacity-50">
+                Run Query
+              </button>
+            </div>
+            <div class="text-xs text-surface-400 mb-2">Examples:</div>
+            <div class="flex flex-wrap gap-2 mb-4">
+              <template x-for="ex in cypherExamples" :key="ex.label">
+                <button @click="cypherQuery=ex.query; runCypher()"
+                  class="mono text-xs px-2 py-1 bg-surface-50 dark:bg-surface-900 rounded border border-surface-200 hover:border-brand-300 transition-colors"
+                  x-text="ex.label"></button>
+              </template>
+            </div>
+            <template x-if="cypherResult">
+              <div>
+                <div class="text-xs font-medium text-surface-400 mb-2" x-text="cypherResult.rows?.length+' result(s)'"></div>
+                <div class="overflow-x-auto">
+                  <table class="w-full text-xs">
+                    <thead>
+                      <tr>
+                        <template x-for="col in (cypherResult.columns||[])" :key="col">
+                          <th class="text-left px-3 py-2 bg-surface-50 dark:bg-surface-900 border-b border-surface-200 font-medium text-surface-400 uppercase"
+                            x-text="col"></th>
+                        </template>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <template x-for="(row,ridx) in (cypherResult.rows||[])" :key="ridx">
+                        <tr class="border-b border-surface-100 hover:bg-surface-50">
+                          <template x-for="(cell,cidx) in row" :key="cidx">
+                            <td class="px-3 py-2" x-text="String(cell||'—')"></td>
+                          </template>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Issues -->
+      <div x-show="graphTab==='issues'">
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100 flex items-center justify-between">
+            <span class="text-sm font-semibold">Issue Types & Resolutions</span>
+            <button @click="loadIssues()" class="text-xs text-brand-600">Refresh</button>
+          </div>
+          <div class="p-4">
+            <template x-if="!graphIssues.length">
+              <div class="text-center text-surface-400 text-sm py-8">
+                <div>Loading…</div>
+                <button @click="loadIssues()" class="text-brand-600 mt-2">Load now</button>
+              </div>
+            </template>
+            <div class="space-y-3">
+              <template x-for="iss in graphIssues" :key="iss.issue">
+                <div class="border border-surface-200 dark:border-surface-600 rounded-lg p-3">
+                  <div class="flex items-center justify-between mb-2">
+                    <span class="mono text-sm font-medium" x-text="iss.issue"></span>
+                    <span class="text-xs text-surface-400" x-text="iss.connected_to||''"></span>
+                  </div>
+                  <div class="text-xs text-surface-400" x-text="iss.relationship||''"></div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /graph -->
+
+    <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  6 · KNOWLEDGE BASE           ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='kb'" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+
+      <div class="flex flex-wrap gap-2 mb-6">
+        <template x-for="s in kbSubTabs" :key="s.id">
+          <button @click="kbTab=s.id"
+            :class="kbTab===s.id?'subtab-active':'subtab-inactive'"
+            class="subtab" x-text="s.label"></button>
+        </template>
+      </div>
+
+      <!-- FAQs -->
+      <div x-show="kbTab==='faqs'">
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100 flex items-center gap-3 flex-wrap">
+            <span class="text-sm font-semibold">FAQs</span>
+            <select x-model="kbBrandFilter" @change="loadFaqs()"
+              class="text-xs rounded border border-surface-200 bg-white dark:bg-surface-800 px-2 py-1">
+              <option value="">All Brands</option>
+              <template x-for="b in brands" :key="b.brand_id">
+                <option :value="b.brand_id" x-text="b.brand_id"></option>
+              </template>
+            </select>
+            <select x-model="kbCategoryFilter" @change="loadFaqs()"
+              class="text-xs rounded border border-surface-200 bg-white dark:bg-surface-800 px-2 py-1">
+              <option value="">All Categories</option>
+              <template x-for="cat in kbCategories" :key="cat">
+                <option :value="cat" x-text="cat"></option>
+              </template>
+            </select>
+            <button @click="loadFaqs()" class="px-3 py-1 text-xs bg-surface-100 dark:bg-surface-700 rounded hover:bg-surface-200">Refresh</button>
+          </div>
+          <div class="p-4 max-h-[60vh] overflow-y-auto space-y-3">
+            <template x-if="!kbFaqs.length && !kbLoading">
+              <div class="text-center text-surface-400 text-sm py-8">
+                No FAQs loaded. <button @click="loadFaqs()" class="text-brand-600">Load FAQs</button>
+              </div>
+            </template>
+            <template x-if="kbLoading">
+              <div class="space-y-3">
+                <template x-for="i in 5" :key="i">
+                  <div class="shimmer h-12 rounded-lg"></div>
+                </template>
+              </div>
+            </template>
+            <template x-for="faq in kbFaqs" :key="faq.question">
+              <details class="collapser group border border-surface-200 dark:border-surface-600 rounded-lg">
+                <summary class="px-3 py-2.5 cursor-pointer text-sm font-medium hover:text-brand-600 transition-colors list-none flex items-center justify-between">
+                  <div class="flex items-center gap-2">
+                    <span class="brand-dot"></span>
+                    <span class="text-xs text-surface-400" x-text="faq.brand_id||''"></span>
+                    <span x-text="faq.question"></span>
+                  </div>
+                  <svg class="w-4 h-4 text-surface-400 chevron" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                  </svg>
+                </summary>
+                <div class="px-3 pb-3 text-xs text-surface-500 border-t border-surface-100 dark:border-surface-700 pt-2" x-text="faq.answer||''"></div>
+              </details>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Policies -->
+      <div x-show="kbTab==='policies'">
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100 flex items-center gap-3">
+            <span class="text-sm font-semibold">Policies</span>
+            <select x-model="policyBrandFilter" @change="loadPolicies()"
+              class="text-xs rounded border border-surface-200 bg-white dark:bg-surface-800 px-2 py-1">
+              <option value="">All Brands</option>
+              <template x-for="b in brands" :key="b.brand_id">
+                <option :value="b.brand_id" x-text="b.brand_id"></option>
+              </template>
+            </select>
+            <button @click="loadPolicies()" class="px-3 py-1 text-xs bg-surface-100 rounded hover:bg-surface-200">Refresh</button>
+          </div>
+          <div class="p-4 max-h-[60vh] overflow-y-auto">
+            <template x-if="!kbPolicies.length && !kbLoading">
+              <div class="text-center text-surface-400 text-sm py-8">No policies. <button @click="loadPolicies()" class="text-brand-600">Load</button></div>
+            </template>
+            <div class="space-y-2">
+              <template x-for="p in kbPolicies" :key="p.title">
+                <div class="flex items-center justify-between p-3 bg-surface-50 dark:bg-surface-900 rounded-lg">
+                  <div>
+                    <div class="text-sm font-medium" x-text="p.title||'—'"></div>
+                    <div class="text-xs text-surface-400 mt-0.5">
+                      <span class="chip" x-text="p.type||'policy'"></span>
+                      <span class="ml-2" x-text="p.brand_id||''"></span>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- pgvector chunks -->
+      <div x-show="kbTab==='chunks'">
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100 flex items-center gap-3 flex-wrap">
+            <span class="text-sm font-semibold">Semantic Chunks (pgvector)</span>
+            <select x-model="chunkBrandFilter" @change="loadChunks()"
+              class="text-xs rounded border border-surface-200 bg-white dark:bg-surface-800 px-2 py-1">
+              <option value="">All Brands</option>
+              <template x-for="b in brands" :key="b.brand_id">
+                <option :value="b.brand_id" x-text="b.brand_id"></option>
+              </template>
+            </select>
+            <select x-model="chunkTypeFilter" @change="loadChunks()"
+              class="text-xs rounded border border-surface-200 bg-white dark:bg-surface-800 px-2 py-1">
+              <option value="">All Types</option>
+              <template x-for="t in chunkTypes" :key="t">
+                <option :value="t" x-text="t"></option>
+              </template>
+            </select>
+            <button @click="loadChunks()" class="px-3 py-1 text-xs bg-surface-100 rounded hover:bg-surface-200">Refresh</button>
+          </div>
+          <div class="p-4 max-h-[60vh] overflow-y-auto">
+            <template x-if="!kbChunks.length && !kbLoading">
+              <div class="text-center text-surface-400 text-sm py-8">No chunks. <button @click="loadChunks()" class="text-brand-600">Load</button></div>
+            </template>
+            <div class="space-y-3">
+              <template x-for="c in kbChunks" :key="c.id">
+                <div class="p-3 bg-surface-50 dark:bg-surface-900 rounded-lg border border-surface-200">
+                  <div class="flex items-center gap-2 mb-1.5 flex-wrap">
+                    <span class="mono text-xs" x-text="c.brand_id||''"></span>
+                    <span class="chip" x-text="c.chunk_type||'?'"></span>
+                    <span class="text-xs text-surface-400 truncate max-w-xs" x-text="c.source_url||''"></span>
+                  </div>
+                  <div class="text-xs text-surface-600 dark:text-surface-300" x-text="c.preview||''"></div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /kb -->
+
+    <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  7 · ONTOLOGY                ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='ontology'" x-init="loadOntology()" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+
+      <!-- Brand selector for brand-specific ontology view -->
+      <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 p-4 mb-6">
+        <div class="flex flex-wrap items-center gap-4">
+          <div>
+            <span class="text-sm font-semibold">Domain View</span>
+          </div>
+          <div class="flex flex-col gap-1">
+            <label class="text-xs font-medium text-surface-400 uppercase tracking-wide">Brand / Domain</label>
+            <select x-model="ontBrandFilter" @change="loadBrandOntology(ontBrandFilter)"
+              class="pl-3 pr-8 py-2 rounded-lg border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+              <option value="">— Global Schema —</option>
+              <template x-for="b in brands" :key="b.brand_id">
+                <option :value="b.brand_id" x-text="b.name+' ('+b.brand_id+')'"></option>
+              </template>
+            </select>
+          </div>
+          <template x-if="ontBrandFilter">
+            <div class="flex items-center gap-2">
+              <span class="brand-dot"></span>
+              <span class="text-sm font-medium" x-text="getBrandName(ontBrandFilter)"></span>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Brand-specific ontology subtree -->
+      <template x-if="ontBrandFilter && brandOntology">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+            <div class="px-4 py-3 border-b border-surface-100">
+              <span class="text-sm font-semibold">Policies</span>
+            </div>
+            <div class="p-4">
+              <template x-if="!brandOntology.policies?.length">
+                <div class="text-center text-surface-400 text-sm py-4">No policies found</div>
+              </template>
+              <div class="flex flex-wrap gap-2">
+                <template x-for="p in brandOntology.policies" :key="p.title">
+                  <span class="chip" x-text="(p.type||'')+': '+(p.title||'—')"></span>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+            <div class="px-4 py-3 border-b border-surface-100">
+              <span class="text-sm font-semibold">Issue Types</span>
+            </div>
+            <div class="p-4">
+              <template x-if="!brandOntology.issue_types?.length">
+                <div class="text-center text-surface-400 text-sm py-4">No issue types found</div>
+              </template>
+              <div class="flex flex-wrap gap-2">
+                <template x-for="it in brandOntology.issue_types" :key="it.issue">
+                  <span class="mono text-xs px-2 py-1 bg-surface-50 dark:bg-surface-900 rounded border border-surface-200"
+                    x-text="it.issue"></span>
+                </template>
+              </div>
+            </div>
+          </div>
+          <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 lg:col-span-2">
+            <div class="px-4 py-3 border-b border-surface-100">
+              <span class="text-sm font-semibold">Sample FAQs</span>
+            </div>
+            <div class="p-4">
+              <template x-if="!brandOntology.sample_faqs?.length">
+                <div class="text-center text-surface-400 text-sm py-4">No FAQs found</div>
+              </template>
+              <div class="space-y-2">
+                <template x-for="f in brandOntology.sample_faqs" :key="f.question">
+                  <div class="p-3 bg-surface-50 dark:bg-surface-900 rounded-lg text-sm" x-text="f.question"></div>
+                </template>
+              </div>
+            </div>
+          </div>
+        </div>
+      </template>
+      <template x-if="ontBrandFilter && !brandOntology">
+        <div class="text-center text-surface-400 text-sm mb-6 py-8">
+          Loading brand ontology for <span x-text="getBrandName(ontBrandFilter) || ontBrandFilter"></span>…
+        </div>
+      </template>
+
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- Schema overview -->
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100 flex items-center justify-between">
+            <span class="text-sm font-semibold">Schema</span>
+            <button @click="loadOntology()" class="text-xs text-brand-600">Refresh</button>
+          </div>
+          <div class="p-4 space-y-4">
+            <div>
+              <div class="text-xs font-medium text-surface-400 uppercase mb-2">Node Labels</div>
+              <div class="flex flex-wrap gap-1.5">
+                <template x-for="l in ontLabels" :key="l">
+                  <span class="mono text-xs px-2 py-1 bg-brand-50 dark:bg-brand-900 text-brand-700 dark:text-brand-300 rounded border border-brand-200" x-text="l"></span>
+                </template>
+              </div>
+            </div>
+            <div>
+              <div class="text-xs font-medium text-surface-400 uppercase mb-2">Relationship Types</div>
+              <div class="flex flex-wrap gap-1.5">
+                <template x-for="r in ontRels" :key="r">
+                  <span class="mono text-xs px-2 py-1 bg-surface-50 dark:bg-surface-900 rounded border border-surface-200" x-text="r"></span>
+                </template>
+              </div>
+            </div>
+            <div>
+              <div class="text-xs font-medium text-surface-400 uppercase mb-2">Property Keys</div>
+              <div class="flex flex-wrap gap-1.5">
+                <template x-for="p in ontProps" :key="p">
+                  <span class="mono text-xs px-2 py-0.5 bg-surface-100 dark:bg-surface-700 rounded" x-text="p"></span>
+                </template>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Entity types -->
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100">
+            <span class="text-sm font-semibold">Entity Types</span>
+          </div>
+          <div class="p-4 max-h-96 overflow-y-auto">
+            <template x-if="!ontTypes.length">
+              <div class="text-center text-surface-400 text-sm py-4">No types loaded. <button @click="loadOntology()" class="text-brand-600">Load</button></div>
+            </template>
+            <div class="space-y-2">
+              <template x-for="t in ontTypes" :key="t.name||t">
+                <div class="p-2 bg-surface-50 dark:bg-surface-900 rounded text-xs">
+                  <span class="font-medium" x-text="t.name||t"></span>
+                  <span class="text-surface-400 ml-2" x-text="t.description||''"></span>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <!-- Proposals -->
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100 flex items-center justify-between">
+            <span class="text-sm font-semibold">Proposals</span>
+            <select x-model="proposalStatus" @change="loadProposals()"
+              class="text-xs rounded border border-surface-200 bg-white dark:bg-surface-800 px-2 py-1">
+              <option value="">All</option>
+              <option value="pending">Pending</option>
+              <option value="active">Active</option>
+            </select>
+          </div>
+          <div class="p-4 max-h-96 overflow-y-auto space-y-3">
+            <template x-if="!ontologyProposals.length">
+              <div class="text-center text-surface-400 text-sm py-4">
+                <button @click="loadProposals()" class="text-brand-600">Load proposals</button>
+              </div>
+            </template>
+            <template x-for="p in ontologyProposals" :key="p.id||p">
+              <div class="p-3 border border-surface-200 dark:border-surface-600 rounded-lg">
+                <div class="flex items-center justify-between mb-1">
+                  <span class="mono text-xs font-medium" x-text="p.id||'—'"></span>
+                  <span class="chip"
+                    :class="p.status==='pending'?'chip-pending':p.status==='active'?'chip-resolved':'chip-info'"
+                    x-text="p.status||'—'"></span>
+                </div>
+                <div class="text-xs text-surface-500 mb-2" x-text="p.description||JSON.stringify(p)||''"></div>
+                <template x-if="p.status==='pending'">
+                  <button @click="applyProposal(p.id||'')"
+                    class="px-3 py-1 text-xs bg-green-600 hover:bg-green-700 text-white rounded transition-colors">
+                    Apply
+                  </button>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Migration panel -->
+      <div class="mt-6 bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+        <div class="px-4 py-3 border-b border-surface-100">
+          <span class="text-sm font-semibold">Node Migration (KnowledgeItem → Typed Labels)</span>
+        </div>
+        <div class="p-4">
+          <p class="text-xs text-surface-400 mb-3">
+            Retroactively re-labels <code>:KnowledgeItem</code> nodes to their proper typed labels (SizeGuide, FAQ, etc.)
+            based on the <code>entity_type</code> property. Run as dry-run first.
+          </p>
+          <div class="flex gap-3">
+            <button @click="runMigration(true)"
+              class="px-4 py-2 bg-surface-100 dark:bg-surface-700 hover:bg-surface-200 dark:hover:bg-surface-600 rounded-lg text-sm transition-colors">
+              Dry Run
+            </button>
+            <button @click="runMigration(false)"
+              class="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm transition-colors">
+              Apply Migration
+            </button>
+          </div>
+          <template x-if="migrationResult">
+            <div class="mt-3 p-3 bg-surface-50 dark:bg-surface-900 rounded-lg text-xs mono" x-text="JSON.stringify(migrationResult)"></div>
+          </template>
+        </div>
+      </div>
+
+    </div><!-- /ontology -->
+
+    <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  8 · INTEGRATIONS             ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='integrations'" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+        <!-- Registered integrations list -->
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100 flex items-center justify-between">
+            <span class="text-sm font-semibold">Registered Integrations</span>
+            <button @click="loadIntegrations()" class="text-xs text-brand-600">Refresh</button>
+          </div>
+          <div class="p-4">
+            <template x-if="!integrations.length">
+              <div class="text-center text-surface-400 text-sm py-6">No integrations registered.</div>
+            </template>
+            <div class="space-y-3">
+              <template x-for="intg in integrations" :key="intg.name">
+                <div class="p-3 border border-surface-200 dark:border-surface-600 rounded-lg">
+                  <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-medium" x-text="intg.name||'—'"></span>
+                    <span class="chip" x-text="intg.type||'mcp'"></span>
+                  </div>
+                  <div class="mono text-xs text-surface-400 mb-1" x-text="intg.url||''"></div>
+                  <div class="text-xs text-surface-500 mb-2" x-text="intg.description||''"></div>
+                  <div class="flex gap-2 flex-wrap">
+                    <button @click="probeIntegration(intg.name||'')"
+                      class="px-2 py-1 text-xs bg-surface-100 dark:bg-surface-700 rounded hover:bg-surface-200 transition-colors">
+                      Probe
+                    </button>
+                    <button @click="removeIntegration(intg.name||'')"
+                      class="px-2 py-1 text-xs bg-red-50 text-red-600 rounded hover:bg-red-100 transition-colors">
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <!-- Register new -->
+        <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100">
+            <span class="text-sm font-semibold">Register Integration</span>
+          </div>
+          <div class="p-4 space-y-3">
+            <div>
+              <label class="text-xs font-medium text-surface-400 block mb-1">Name</label>
+              <input type="text" x-model="newInt.name" placeholder="e.g. acme_crm"
+                class="w-full text-sm rounded border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+            </div>
+            <div>
+              <label class="text-xs font-medium text-surface-400 block mb-1">URL</label>
+              <input type="text" x-model="newInt.url" placeholder="https://api.example.com/mcp/sse"
+                class="w-full text-sm rounded border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+            </div>
+            <div>
+              <label class="text-xs font-medium text-surface-400 block mb-1">Description</label>
+              <input type="text" x-model="newInt.description" placeholder="ACME CRM integration"
+                class="w-full text-sm rounded border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+            </div>
+            <div>
+              <label class="text-xs font-medium text-surface-400 block mb-1">Type</label>
+              <select x-model="newInt.type"
+                class="w-full text-sm rounded border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 px-3 py-2">
+                <option value="mcp">MCP Server</option>
+                <option value="rest">REST API</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs font-medium text-surface-400 block mb-1">Auth Header Key (optional)</label>
+              <input type="text" x-model="newInt.authHeader" placeholder="e.g. Authorization"
+                class="w-full text-sm rounded border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+            </div>
+            <button @click="registerIntegration()"
+              :disabled="!newInt.name||!newInt.url"
+              class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium disabled:opacity-50 transition-colors">
+              Register
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Probe result -->
+      <template x-if="intProbeResult">
+        <div class="mt-6 bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+          <div class="px-4 py-3 border-b border-surface-100">
+            <span class="text-sm font-semibold">Probe Result: <span x-text="intProbeResult.integration||''"></span></span>
+          </div>
+          <div class="p-4">
+            <div class="text-xs text-surface-400 mb-2" x-text="intProbeResult.tool_count+' tool(s) available'"></div>
+            <div class="flex flex-wrap gap-2">
+              <template x-for="t in (intProbeResult.tools||[])" :key="t.name||''">
+                <span class="mono text-xs px-2 py-1 bg-surface-50 dark:bg-surface-900 rounded border border-surface-200"
+                  x-text="t.name||'—'"></span>
+              </template>
+            </div>
+          </div>
+        </div>
+      </template>
+
+    </div><!-- /integrations -->
+
+    <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  9 · VOICE                   ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='voice'" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+
+      <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 mb-6">
+        <div class="px-4 py-3 border-b border-surface-100 flex items-center justify-between">
+          <span class="text-sm font-semibold">Active Voice Calls</span>
+          <button @click="loadVoiceCalls()"
+            class="px-3 py-1 text-xs bg-surface-100 dark:bg-surface-700 rounded hover:bg-surface-200">Refresh</button>
+        </div>
+        <div class="p-4">
+          <template x-if="!voiceCalls.length">
+            <div class="text-center text-surface-400 text-sm py-6">No active voice calls</div>
+          </template>
+          <div class="space-y-3">
+            <template x-for="c in voiceCalls" :key="c.call_sid||''">
+              <div class="flex items-center justify-between p-3 bg-surface-50 dark:bg-surface-900 rounded-lg">
+                <div>
+                  <div class="mono text-xs" x-text="c.call_sid||'—'"></div>
+                  <div class="text-xs text-surface-400 mt-0.5">
+                    <span x-text="c.from_number||'—'"></span>
+                    <span class="mx-2">→</span>
+                    <span x-text="c.to_number||'—'"></span>
+                  </div>
+                </div>
+                <span class="chip" x-text="c.status||'active'"></span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200">
+        <div class="px-4 py-3 border-b border-surface-100">
+          <span class="text-sm font-semibold">Start Dev Voice Call</span>
+        </div>
+        <div class="p-4 space-y-3">
+          <div>
+            <label class="text-xs font-medium text-surface-400 block mb-1">Brand</label>
+            <select x-model="voiceBrand"
+              class="w-full text-sm rounded border border-surface-200 dark:border-surface-600 bg-white dark:bg-surface-800 px-3 py-2">
+              <template x-for="b in brands" :key="b.brand_id">
+                <option :value="b.brand_id" x-text="b.name+' ('+b.brand_id+')'"></option>
+              </template>
+            </select>
+          </div>
+          <button @click="startVoiceCall()"
+            :disabled="voiceLoading"
+            class="px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium disabled:opacity-50 transition-colors">
+            <span x-text="voiceLoading?'Starting…':'Start Voice Call'"></span>
+          </button>
+          <template x-if="voiceResult">
+            <div class="p-3 bg-surface-50 dark:bg-surface-900 rounded-lg text-xs mono" x-text="JSON.stringify(voiceResult)"></div>
+          </template>
+        </div>
+      </div>
+
+    </div><!-- /voice -->
+
+  </main>
+</div><!-- /app -->
+
+<!-- ═══════════════════════════════════════════════
+     JAVASCRIPT
+════════════════════════════════════════════════ -->
+<script src="/static/admin/js/app.js"></script>
+
+</body>
+</html>

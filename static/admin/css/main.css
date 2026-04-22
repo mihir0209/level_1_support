@@ -1,0 +1,120 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   L1 Support AI — Global Styles
+   Loaded once; all pages share this via /static/admin/css/main.css
+───────────────────────────────────────────────────────────────────────── */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+/* ── Brand dots ─────────────────────────────────────────────────────────── */
+.brand-dot {
+  width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+}
+.brand-boohoo_uk    { --b: hsl(270, 70%, 55%); }
+.brand-plt_uk       { --b: hsl(330, 70%, 55%); }
+.brand-karenmillen_uk { --b: hsl(200, 65%, 50%); }
+.brand-nastygal_us  { --b: hsl(350, 70%, 50%); }
+.brand-dot { background: var(--b, hsl(260, 70%, 55%)); }
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+.dark ::-webkit-scrollbar-thumb { background: #475569; }
+
+/* ── Status pills ──────────────────────────────────────────────────────── */
+.status-resolved    { background: #dcfce7; color: #166534; }
+.status-escalated  { background: #fee2e2; color: #991b1b; }
+.status-active     { background: #dbeafe; color: #1e40af; }
+.status-processing{ background: #fef9c3; color: #854d0e; }
+
+/* ── Chat bubbles ───────────────────────────────────────────────────────── */
+.msg-user .bubble { background: #7c3aed; color: #fff;
+  border-radius: 18px 18px 4px 18px; }
+.msg-agent .bubble { background: #1e293b; color: #fff;
+  border-radius: 18px 18px 18px 4px; }
+.msg-system .bubble { background: #fef3c7; color: #92400e;
+  border-radius: 8px; }
+
+/* ── Animations ────────────────────────────────────────────────────────── */
+.slide-enter { animation: slideIn 0.2s ease-out; }
+@keyframes slideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+.metric-card { transition: transform 0.15s, box-shadow 0.15s; }
+.metric-card:hover { transform: translateY(-2px); box-shadow: 0 8px 25px -5px rgba(0,0,0,0.1); }
+
+.typing-dot { animation: typingBounce 1.2s infinite; }
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+@keyframes typingBounce {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-4px); }
+}
+
+[x-cloak] { display: none !important; }
+
+/* ── Tab underline ─────────────────────────────────────────────────────── */
+.tab-active { border-bottom: 2px solid #7c3aed; color: #7c3aed; }
+
+/* ── Section nav pills ──────────────────────────────────────────────────── */
+.snav-btn { padding: 6px 14px; border-radius: 9999px; font-size: 0.75rem;
+  font-weight: 500; border: 1px solid; transition: all 0.15s; cursor: pointer;
+  background: transparent; }
+.snav-btn:hover { opacity: 0.8; }
+.snav-active { background: #7c3aed; color: #fff; border-color: #7c3aed; }
+.snav-inactive { border-color: #cbd5e1; color: #64748b; }
+.snav-inactive:hover { border-color: #7c3aed; color: #7c3aed; }
+
+/* ── Section panel ──────────────────────────────────────────────────────── */
+.section-panel { display: none; }
+.section-panel.active { display: block; }
+
+/* ── Sub-tab nav ───────────────────────────────────────────────────────── */
+.subtab { padding: 4px 12px; border-radius: 6px; font-size: 0.75rem;
+  font-weight: 500; cursor: pointer; border: 1px solid; transition: all 0.15s; }
+.subtab-active { background: #7c3aed; color: #fff; border-color: #7c3aed; }
+.subtab-inactive { border-color: #e2e8f0; color: #64748b; }
+.subtab-inactive:hover { border-color: #7c3aed; color: #7c3aed; }
+
+/* ── Code / mono ───────────────────────────────────────────────────────── */
+.mono { font-family: 'JetBrains Mono', monospace; }
+code, pre { font-family: 'JetBrains Mono', monospace; }
+
+/* ── Toast notifications ───────────────────────────────────────────────── */
+.toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+  display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.toast { padding: 10px 16px; border-radius: 10px; font-size: 0.8rem;
+  font-weight: 500; pointer-events: auto; animation: toastSlide 0.25s ease-out;
+  max-width: 320px; }
+.toast-success { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+.toast-error   { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+.toast-info    { background: #dbeafe; color: #1e40af; border: 1px solid #bfdbfe; }
+@keyframes toastSlide { from { opacity:0; transform: translateX(20px); }
+  to { opacity:1; transform: translateX(0); } }
+
+/* ── Loading shimmer ───────────────────────────────────────────────────── */
+.shimmer { background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+  background-size: 200% 100%; animation: shimmer 1.4s infinite;
+  border-radius: 6px; }
+.dark .shimmer { background: linear-gradient(90deg, #1e293b 25%, #334155 50%, #1e293b 75%);
+  background-size: 200% 100%; }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* ── Badge / chip ───────────────────────────────────────────────────────── */
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
+  border-radius: 9999px; font-size: 0.7rem; font-weight: 500; }
+.chip-brand { background: #fdf4ff; color: #a21caf; }
+.chip-resolved { background: #dcfce7; color: #166534; }
+.chip-escalated { background: #fee2e2; color: #991b1b; }
+.chip-active { background: #dbeafe; color: #1e40af; }
+.chip-pending { background: #fef9c3; color: #854d0e; }
+.chip-info { background: #e0f2fe; color: #075985; }
+
+/* ── Collapsible panel ──────────────────────────────────────────────────── */
+.collapser summary { cursor: pointer; list-style: none; display: flex;
+  align-items: center; justify-content: space-between; }
+.collapser summary::-webkit-details-marker { display: none; }
+.collapser summary .chevron { transition: transform 0.2s; }
+.collapser[open] summary .chevron { transform: rotate(180deg); }
+
+/* ── Graph bar ──────────────────────────────────────────────────────────── */
+.graph-bar { height: 6px; border-radius: 9999px; transition: width 0.5s ease-out; }

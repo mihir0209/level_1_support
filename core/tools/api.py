@@ -139,9 +139,23 @@ def list_customers(
 
     **Demo customer_ids:** `cust_001` (boohoo_uk) · `cust_002` (plt_uk) · `cust_003` (karenmillen_uk)
     """
+    # Start with static mock customers
     custs = list(_MOCK_CUSTOMERS.values())
+
+    # Merge in dynamically seeded demo customers for the requested brand
+    from main import _DEMO_DATA
+    if brand_id and brand_id in _DEMO_DATA:
+        seeded = _DEMO_DATA[brand_id]["customers"]
+        # Map Customer objects to plain dicts so they serialize consistently
+        for cid, cust in seeded.items():
+            if isinstance(cust, dict):
+                custs.append(cust)
+            else:
+                # Customer pydantic model — unpack to dict
+                custs.append(cust.model_dump())
+
     if brand_id:
-        custs = [c for c in custs if c["brand_id"] == brand_id]
+        custs = [c for c in custs if c.get("brand_id") == brand_id]
     return CustomerListResponse(total=len(custs), customers=custs[:limit])
 
 
@@ -160,25 +174,43 @@ def get_customer(
 
     Demo IDs: `cust_001` (boohoo_uk) · `cust_002` (plt_uk) · `cust_003` (karenmillen_uk)
     """
+    # Try static mocks first, then look in dynamic demo data
     customer = _MOCK_CUSTOMERS.get(customer_id)
+    if not customer:
+        # Scan _DEMO_DATA for seeded customers whose key matches the requested ID
+        from main import _DEMO_DATA
+        for data in _DEMO_DATA.values():
+            if customer_id in data["customers"]:
+                customer = data["customers"][customer_id]
+                break
     if not customer:
         raise HTTPException(
             status_code=404,
-            detail=f"Customer '{customer_id}' not found. Valid demo IDs: cust_001, cust_002, cust_003",
+            detail="Customer not found. After seeding, use IDs like boohoo_uk_cust_001",
         )
     brand_entry = get_brand_by_id(customer["brand_id"])
     orders = [o for o in _MOCK_ORDERS.values() if o["customer_id"] == customer_id]
     returns = [r for r in _MOCK_RETURNS.values() if r["customer_id"] == customer_id]
-    return {
-        **customer,
-        "brand": {
-            "brand_id": brand_entry.brand_id if brand_entry else customer["brand_id"],
-            "name": brand_entry.name if brand_entry else "",
-            "domains": brand_entry.domains if brand_entry else [],
-        },
-        "orders": orders,
-        "returns": returns,
+
+    # Build response dict — serialize the Customer model fields
+    resp = dict(customer)
+    resp["brand"] = {
+        "brand_id": brand_entry.brand_id if brand_entry else customer["brand_id"],
+        "name": brand_entry.name if brand_entry else "",
+        "domains": brand_entry.domains if brand_entry else [],
     }
+    resp["orders"] = orders
+    resp["returns"] = returns
+
+    # Pull recent_orders / open_returns from the Customer model if present
+    if hasattr(customer, "recent_orders"):
+        resp["recent_orders"] = [
+            o.model_dump() if hasattr(o, "model_dump") else dict(o)
+            for o in customer.recent_orders
+        ]
+    if hasattr(customer, "open_returns"):
+        resp["open_returns"] = customer.open_returns
+    return resp
 
 
 # ══════════════════════════════════════════════════════════════════════════════
