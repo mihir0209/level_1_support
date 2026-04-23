@@ -607,9 +607,10 @@ async def chatwoot_webhook(request: Request):
     if not content or not chatwoot_conv_id:
         return {"status": "skipped"}
 
-    # Resolve brand from inbox_id
-    # Phase 1: default to boohoo_uk
-    brand_id = "boohoo_uk"
+    # Resolve brand from inbox_id via registry
+    from brands.registry import get_brand_by_chatwoot_inbox
+    brand_entry = get_brand_by_chatwoot_inbox(inbox_id) if inbox_id else None
+    brand_id = brand_entry.brand_id if brand_entry else "boohoo_uk"
 
     # Check if session exists for this Chatwoot conversation
     session_key = f"chatwoot:{chatwoot_conv_id}"
@@ -629,6 +630,7 @@ async def chatwoot_webhook(request: Request):
         "chatwoot_message_processed",
         chatwoot_conv_id=chatwoot_conv_id,
         session_id=session_id,
+        brand_id=brand_id,
         intent=response.intent,
     )
 

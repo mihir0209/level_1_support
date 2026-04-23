@@ -113,6 +113,22 @@ async def _upsert_to_graph(result: ValidationResult) -> bool:
         return False
 
 
+async def _ensure_review_queue_table(conn) -> None:
+    """Create resolution_review_queue if it doesn't exist."""
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS resolution_review_queue (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            brand_id            VARCHAR(64) NOT NULL,
+            issue_type          VARCHAR(64),
+            resolution_tried    VARCHAR(128),
+            failure_reason      TEXT,
+            conversation        JSONB,
+            reviewed            BOOLEAN DEFAULT FALSE,
+            created_at          TIMESTAMPTZ DEFAULT NOW()
+        )
+    """)
+
+
 async def _queue_for_review(results: list[ValidationResult]) -> int:
     """Write human-review items to Postgres resolution_review_queue."""
     if not results:
@@ -122,21 +138,20 @@ async def _queue_for_review(results: list[ValidationResult]) -> int:
         from config import settings
 
         conn = await asyncpg.connect(settings.postgres_dsn.replace("+asyncpg", ""))
+        await _ensure_review_queue_table(conn)
         inserted = 0
         for r in results:
             import json as _json
             await conn.execute(
                 """
                 INSERT INTO resolution_review_queue
-                    (brand_id, item_type, item_data, confidence, source_url, status, created_at)
-                VALUES ($1, $2, $3, $4, $5, 'pending', NOW())
+                    (brand_id, issue_type, failure_reason, reviewed, created_at)
+                VALUES ($1, $2, $3, FALSE, NOW())
                 ON CONFLICT DO NOTHING
                 """,
                 r.brand_id,
                 r.item_type,
                 _json.dumps(r.item_data),
-                r.confidence,
-                r.source_url,
             )
             inserted += 1
         await conn.close()

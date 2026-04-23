@@ -93,10 +93,13 @@ BRAND_REGISTRY: list[BrandEntry] = [
 # Build lookup indexes
 _by_domain: dict[str, BrandEntry] = {}
 _by_id: dict[str, BrandEntry] = {}
+_by_chatwoot_inbox: dict[int, BrandEntry] = {}
 for entry in BRAND_REGISTRY:
     _by_id[entry.brand_id] = entry
     for domain in entry.domains:
         _by_domain[domain.lower()] = entry
+    if entry.chatwoot_inbox_id is not None:
+        _by_chatwoot_inbox[entry.chatwoot_inbox_id] = entry
 
 
 def resolve_brand(identifier: str) -> BrandEntry | None:
@@ -107,6 +110,11 @@ def resolve_brand(identifier: str) -> BrandEntry | None:
 
 def get_brand_by_id(brand_id: str) -> BrandEntry | None:
     return _by_id.get(brand_id)
+
+
+def get_brand_by_chatwoot_inbox(inbox_id: int) -> BrandEntry | None:
+    """Resolve brand from a Chatwoot inbox ID. Returns None if not found."""
+    return _by_chatwoot_inbox.get(inbox_id)
 
 
 def register_brand(entry: BrandEntry) -> bool:
@@ -121,4 +129,6 @@ def register_brand(entry: BrandEntry) -> bool:
     _by_id[entry.brand_id] = entry
     for domain in entry.domains:
         _by_domain[domain.lower()] = entry
+    if entry.chatwoot_inbox_id is not None:
+        _by_chatwoot_inbox[entry.chatwoot_inbox_id] = entry
     return True
