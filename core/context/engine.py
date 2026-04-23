@@ -419,6 +419,7 @@ async def assemble_context(
             "UK",
             message,
             intent.category.value,
+            llm_client,
         ),
         asyncio.to_thread(get_brand_info, brand_id),
         _fetch_graphiti_history(),

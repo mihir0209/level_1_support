@@ -390,11 +390,14 @@ def retrieve_knowledge(
     region: str = "UK",
     query_text: str = "",
     intent_category: str = "unknown",
+    llm_client=None,
 ) -> RetrievalResult:
     """
     Main entry point for the Context Assembly Engine (Step 4 + Step 5).
+
     Pattern A: pre-built IssueType→Resolution paths (fast, high-confidence).
-    Pattern C fallback: keyword search across collected KB nodes when Pattern A yields nothing.
+    Pattern B (Text2Cypher): LLM generates a Cypher query for novel/unmatched queries.
+    Pattern C: keyword search across collected KB nodes as last resort.
     """
     import time
     t0 = time.monotonic()
@@ -402,14 +405,25 @@ def retrieve_knowledge(
     resolutions = get_resolutions_for_issue(brand_id, issue_type_id)
     policy = get_return_policy(brand_id, order_placed_at)
 
-    # Pattern C: fall back to collected KB nodes when no IssueType path exists
     kb_items: list[dict] = []
+
     if not resolutions and query_text:
-        kb_items = search_kb_nodes(brand_id, query_text, intent_category)
+        # Try Text2Cypher first (Pattern B) — uses LLM to generate a targeted graph query
+        if llm_client is not None:
+            import asyncio
+            kb_items = asyncio.get_event_loop().run_until_complete(
+                text2cypher_search(query_text, brand_id, llm_client)
+            )
+            if kb_items:
+                log.info("text2cypher_hit", brand_id=brand_id, items=len(kb_items))
+
+        # Fallback: keyword search across KB nodes (Pattern C)
+        if not kb_items:
+            kb_items = search_kb_nodes(brand_id, query_text, intent_category)
 
     latency_ms = (time.monotonic() - t0) * 1000
     confidence = 0.95 if resolutions else (0.75 if kb_items else 0.3)
-    source = "graph_tool" if resolutions else ("kb_search" if kb_items else "graph_tool")
+    source = "graph_tool" if resolutions else ("text2cypher" if kb_items else "kb_search")
 
     log.info(
         "knowledge_retrieved",
