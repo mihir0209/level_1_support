@@ -58,9 +58,25 @@ SESSIONS_TOTAL = Counter("l1_sessions_total", "Total sessions created", ["brand_
 
 # ── Lifespan: startup / shutdown ──────────────────────────────────────────
 
+from contextlib import asynccontextmanager
+
+# Track graceful shutdown flag
+_shutdown_requested = False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("startup", environment=settings.environment)
+    global _shutdown_requested
+    _shutdown_requested = False
+
+    # Configure structured logging before any log calls
+    from core.logging_config import configure_logging
+    configure_logging(settings.log_level, settings.environment)
+
+    # Initialize OpenTelemetry tracing
+    from core.tracing import get_tracer
+    tracer = get_tracer()
+    log.info("startup", environment=settings.environment, otel_service="l1_support")
 
     # Restore dynamically registered brands from Redis
     try:
@@ -106,6 +122,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Graceful shutdown — drain in-flight requests before exiting
+    log.info("shutdown_initiated")
+    _shutdown_requested = True
+
     # Shutdown scheduler
     try:
         from ingestion.scheduler import stop_scheduler
@@ -145,6 +165,7 @@ app = FastAPI(
 )
 
 from core.middleware.rate_limit import rate_limit_middleware
+from core.logging_config import bind_correlation, clear_correlation
 
 app.add_middleware(
     CORSMiddleware,
@@ -153,6 +174,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.middleware("http")(rate_limit_middleware)
+
+
+@app.middleware("http")
+async def correlation_middleware(request: Request, call_next):
+    """
+    Inject request_id from X-Request-ID header or generate one.
+    Bind to structlog correlation context for all log entries in this request.
+    """
+    import uuid
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())[:16]
+    brand_id = request.query_params.get("brand_id") or ""
+    session_id = request.headers.get("X-Session-ID") or ""
+    bind_correlation(request_id=request_id, brand_id=brand_id, session_id=session_id)
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    clear_correlation()
+    return response
 
 # Serve the admin visualizer at /admin/ui
 import os as _os
@@ -640,24 +678,64 @@ async def chatwoot_webhook(request: Request):
     return {"status": "processed", "session_id": session_id, "response": response.response}
 
 
-@app.get("/health", tags=["System"])
+@app.get("/health", tags=["System"], include_in_schema=True)
 async def health():
-    graph_ok = verify_connectivity()
-    from core.memory.session import get_redis
+    """
+    Liveness probe — confirms the process is alive and the web server is responding.
+    Does NOT check external dependencies.
+    """
+    return {"status": "ok", "service": "l1_support", "version": "0.1.0"}
+
+
+@app.get("/ready", tags=["System"])
+async def ready():
+    """
+    Readiness probe — confirms all external dependencies are reachable.
+    Returns 200 if the service can accept traffic, 503 if any critical dependency is down.
+    """
+    checks: dict[str, str] = {}
+    all_ok = True
+
+    # FalkorDB
     try:
+        _, graph = get_graph_client()
+        graph.query("RETURN 1")
+        checks["falkordb"] = "ok"
+    except Exception as e:
+        checks["falkordb"] = f"error: {e}"
+        all_ok = False
+
+    # Redis
+    try:
+        from core.memory.session import get_redis
         r = get_redis()
         await r.ping()
-        redis_ok = True
-    except Exception:
-        redis_ok = False
+        checks["redis"] = "ok"
+    except Exception as e:
+        checks["redis"] = f"error: {e}"
+        all_ok = False
 
-    status = "healthy" if (graph_ok and redis_ok) else "degraded"
-    return {
-        "status": status,
-        "falkordb": "ok" if graph_ok else "unavailable",
-        "redis": "ok" if redis_ok else "unavailable",
-        "version": "0.1.0",
-    }
+    # Postgres (via psycopg)
+    try:
+        import psycopg
+        conn_str = (
+            f"host={settings.postgres_host} port={settings.postgres_port} "
+            f"dbname={settings.postgres_db} user={settings.postgres_user} "
+            f"password={settings.postgres_password}"
+        )
+        async with await psycopg.AsyncConnection.connect(conn_str) as conn:
+            await conn.execute("SELECT 1")
+        checks["postgres"] = "ok"
+    except Exception as e:
+        checks["postgres"] = f"error: {e}"
+        all_ok = False
+
+    status_code = 200 if all_ok else 503
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        {"status": "ready" if all_ok else "not_ready", "checks": checks},
+        status_code=status_code,
+    )
 
 
 @app.get("/metrics", tags=["System"])
