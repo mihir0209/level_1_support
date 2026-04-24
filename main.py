@@ -29,14 +29,14 @@ warnings.filterwarnings("ignore", message="Pydantic serializer warnings", catego
 warnings.filterwarnings("ignore", message=".*renamed to.*ddgs.*", category=RuntimeWarning)
 
 import structlog
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Header
+from typing import Annotated
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Header, Path, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+from starlette.responses import PlainTextResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import AIMessage, HumanMessage
 from prometheus_client import Counter, Histogram, generate_latest
-from pydantic import BaseModel
-from starlette.responses import PlainTextResponse
 
 from brands.registry import resolve_brand, BRAND_REGISTRY
 from config import settings
@@ -144,12 +144,15 @@ app = FastAPI(
     openapi_tags=_OPENAPI_TAGS,
 )
 
+from core.middleware.rate_limit import rate_limit_middleware
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.middleware("http")(rate_limit_middleware)
 
 # Serve the admin visualizer at /admin/ui
 import os as _os
@@ -666,10 +669,12 @@ async def metrics():
 # KNOWLEDGE GRAPH / ONTOLOGY / KB / SYSTEM ENDPOINTS
 # ═══════════════════════════════════════════════════════════════════════════
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-admin_router = APIRouter(prefix="/admin")
+from core.middleware.auth import verify_admin_key
+
+admin_router = APIRouter(prefix="/admin", dependencies=[Depends(verify_admin_key)])
 
 # ── Graph endpoints ───────────────────────────────────────────────────────────
 @admin_router.get("/graph/summary", tags=["Graph"])
@@ -698,8 +703,12 @@ async def graph_relationships():
 
 
 @admin_router.get("/graph/brand/{brand_id}", tags=["Graph"])
-async def graph_brand(brand_id: str):
+async def graph_brand(brand_id: Annotated[str, Path(max_length=64)]):
     """All nodes connected to a specific brand. Use `/admin/brands` to get valid `brand_id` values."""
+    try:
+        brand_id = validate_brand_id(brand_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     try:
         _, graph = get_graph_client()
         result = graph.query(
@@ -727,8 +736,10 @@ async def graph_issues():
         raise HTTPException(status_code=503, detail=str(e))
 
 
+from core.schemas.validation import GraphQueryRequest, validate_brand_id
+
 @admin_router.get("/graph/query", tags=["Graph"])
-async def graph_query(q: str):
+async def graph_query(q: Annotated[str, Field(min_length=1, max_length=2000)]):
     """Raw Cypher query against the knowledge graph. Example: `MATCH (n:Brand) RETURN n LIMIT 5`"""
     try:
         _, graph = get_graph_client()
@@ -878,13 +889,17 @@ async def migrate_nodes_to_ontology(dry_run: bool = True):
 
 
 @admin_router.get("/ontology/brand/{brand_id}", tags=["Graph"])
-async def ontology_brand(brand_id: str):
+async def ontology_brand(brand_id: Annotated[str, Path(max_length=64)]):
     """
     Brand knowledge subtree — policies, issue types, FAQs, and knowledge items.
 
     Note: Brand nodes are keyed by `id` property (not `brand_id`).
     Also queries directly by brand_id property on child nodes as fallback.
     """
+    try:
+        brand_id = validate_brand_id(brand_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     try:
         _, graph = get_graph_client()
 
@@ -918,8 +933,13 @@ async def ontology_brand(brand_id: str):
 
 # ── Knowledge Base endpoints ──────────────────────────────────────────────────
 @admin_router.get("/kb/faqs", tags=["Knowledge Base"])
-async def kb_faqs(brand_id: str | None = None, category: str | None = None):
+async def kb_faqs(brand_id: Annotated[str | None, Query(max_length=64)] = None, category: str | None = None):
     """FAQs from FalkorDB — filter by `brand_id` and/or `category`."""
+    if brand_id:
+        try:
+            brand_id = validate_brand_id(brand_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     try:
         _, graph = get_graph_client()
         where = "WHERE 1=1"
@@ -938,8 +958,13 @@ async def kb_faqs(brand_id: str | None = None, category: str | None = None):
 
 
 @admin_router.get("/kb/policies", tags=["Knowledge Base"])
-async def kb_policies(brand_id: str | None = None):
+async def kb_policies(brand_id: Annotated[str | None, Query(max_length=64)] = None):
     """Policies from FalkorDB — optionally filtered by `brand_id`."""
+    if brand_id:
+        try:
+            brand_id = validate_brand_id(brand_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     try:
         _, graph = get_graph_client()
         where = f"WHERE p.brand_id = '{brand_id}'" if brand_id else ""
@@ -953,8 +978,13 @@ async def kb_policies(brand_id: str | None = None):
 
 
 @admin_router.get("/kb/pgvector/chunks", tags=["Knowledge Base"])
-async def kb_chunks(brand_id: str | None = None, chunk_type: str | None = None, limit: int = 20):
+async def kb_chunks(brand_id: Annotated[str | None, Query(max_length=64)] = None, chunk_type: str | None = None, limit: Annotated[int, Query(ge=1, le=200)] = 20):
     """Semantic-search chunks from Postgres pgvector — the base for vector retrieval."""
+    if brand_id:
+        try:
+            brand_id = validate_brand_id(brand_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     if not settings.postgres_host:
         return {"count": 0, "chunks": [], "note": "Postgres not configured"}
     try:
@@ -1092,8 +1122,12 @@ async def add_brand(req: BrandRegisterRequest):
 
 
 @admin_router.get("/brands/{brand_id}", tags=["Brands"])
-async def get_brand_detail(brand_id: str):
+async def get_brand_detail(brand_id: Annotated[str, Path(max_length=64)]):
     """Single brand detail. Call `GET /admin/brands` first to see valid `brand_id` values."""
+    try:
+        brand_id = validate_brand_id(brand_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     from brands.registry import get_brand_by_id
     entry = get_brand_by_id(brand_id)
     if not entry:
@@ -1109,7 +1143,7 @@ async def get_brand_detail(brand_id: str):
 
 
 @admin_router.post("/brands/{brand_id}/demo-data", tags=["Operations"])
-async def seed_brand_demo_data(brand_id: str):
+async def seed_brand_demo_data(brand_id: Annotated[str, Path(max_length=64)]):
     """
     Seed realistic mock demo data for a brand — simulates the customer/order
     data that the brand's own backend systems would provide in production.
@@ -1131,6 +1165,10 @@ async def seed_brand_demo_data(brand_id: str):
 
     Re-calling this endpoint regenerates the data (new tracking IDs, fresh timestamps).
     """
+    try:
+        brand_id = validate_brand_id(brand_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     from brands.registry import get_brand_by_id
     entry = get_brand_by_id(brand_id)
     if not entry:
@@ -1162,7 +1200,7 @@ async def seed_brand_demo_data(brand_id: str):
 
 # ── Session endpoints ─────────────────────────────────────────────────────────
 @admin_router.get("/sessions", tags=["Sessions"])
-async def list_sessions(brand_id: str | None = None, limit: int = 50):
+async def list_sessions(brand_id: Annotated[str | None, Query(max_length=64)] = None, limit: Annotated[int, Query(ge=1, le=200)] = 50):
     """All active sessions in Redis — optionally filtered by `brand_id`."""
     from core.memory.session import get_redis
     r = get_redis()
@@ -1260,13 +1298,14 @@ async def system_overview():
 # ── Brand data collection endpoints ──────────────────────────────────────────
 
 class CollectRequest(BaseModel):
+    base_url: str | None = None
     resume: bool = True
-    max_urls: int = 200
-    concurrency: int = 5
+    max_urls: Annotated[int, Field(ge=1, le=500)] = 200
+    concurrency: Annotated[int, Field(ge=1, le=20)] = 5
 
 
 @admin_router.post("/brands/{brand_id}/collect", tags=["Brands"])
-async def trigger_brand_collection(brand_id: str, req: CollectRequest = CollectRequest()):
+async def trigger_brand_collection(brand_id: Annotated[str, Path(max_length=64)], req: CollectRequest):
     """
     Trigger agent-driven data collection for a registered brand.
 
@@ -1281,12 +1320,16 @@ async def trigger_brand_collection(brand_id: str, req: CollectRequest = CollectR
 
     Check progress with `GET /admin/brands/{brand_id}/collect/status`.
     """
+    try:
+        brand_id = validate_brand_id(brand_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     from brands.registry import get_brand_by_id
     entry = get_brand_by_id(brand_id)
     if not entry:
         raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not found. Register it first via POST /admin/brands.")
 
-    base_url = f"https://{entry.domains[0]}" if entry.domains else f"https://{brand_id}.com"
+    base_url = req.base_url or (f"https://{entry.domains[0]}" if entry.domains else f"https://{brand_id}.com")
 
     async def _run_in_background():
         from ingestion.agent_collector import run_agent_collection, _save_status
@@ -1314,7 +1357,7 @@ async def trigger_brand_collection(brand_id: str, req: CollectRequest = CollectR
 
 
 @admin_router.get("/brands/{brand_id}/collect/status", tags=["Brands"])
-async def brand_collection_status(brand_id: str):
+async def brand_collection_status(brand_id: Annotated[str, Path(max_length=64)]):
     """
     Check the current data collection status for a brand.
 
@@ -1332,7 +1375,7 @@ async def brand_collection_status(brand_id: str):
 
 
 @admin_router.get("/brands/{brand_id}/probe", tags=["Brands"])
-async def probe_brand_scraping(brand_id: str):
+async def probe_brand_scraping(brand_id: Annotated[str, Path(max_length=64)]):
     """
     Probe a brand's website to determine whether bot protection is active
     and which scraping strategy is recommended.
@@ -1347,6 +1390,10 @@ async def probe_brand_scraping(brand_id: str):
     Brands that return **recommended_strategy: httpx** can be scraped cheaply without
     launching a headless browser — much faster and more reliable.
     """
+    try:
+        brand_id = validate_brand_id(brand_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     from brands.registry import get_brand_by_id
     from ingestion.agent_collector import probe_site_access
 
@@ -1428,6 +1475,325 @@ async def upload_brand_documents(
 
     result["skipped"] = result.get("skipped", []) + skipped
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# API REGISTRY ADMIN ENDPOINTS — dynamic brand API tools
+# ═══════════════════════════════════════════════════════════════════════════
+
+class CurlParseRequest(BaseModel):
+    """Parse a curl command and extract endpoint details."""
+    curl_command: str
+    name: str | None = None
+    description: str | None = None
+    tags: list[str] = []
+    rate_limit_per_min: int | None = None
+
+
+class EndpointRegisterRequest(BaseModel):
+    """Register an endpoint explicitly (alternative to curl paste)."""
+    name: str
+    description: str = ""
+    method: str = "GET"
+    path: str
+    query_params: list[dict] = []
+    body_schema: dict | None = None
+    response_schema: dict | None = None
+    rate_limit_per_min: int | None = None
+    requires_auth: bool = False
+    tags: list[str] = []
+    curl_command: str | None = None  # optional: derive method/path from curl
+
+
+class CredentialStoreRequest(BaseModel):
+    """Store encrypted credentials for a brand's API."""
+    key_type: str  # api_key | bearer_token | basic_auth | oauth2
+    key_name: str
+    value: str
+
+
+@admin_router.post("/api-config/register", tags=["API Registry"])
+async def register_api_config(brand_id: Annotated[str, Query(max_length=64)], base_url: str, description: str = ""):
+    """
+    Register (or update) a brand's API configuration.
+    Base URL is the root — endpoints are added separately.
+    """
+    try:
+        brand_id = validate_brand_id(brand_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    from core.tools.api_registry import register_brand_api
+    try:
+        config_id = register_brand_api(brand_id=brand_id, base_url=base_url, description=description)
+        return {"success": True, "config_id": config_id, "brand_id": brand_id}
+    except Exception as e:
+        log.error("api_config_register_failed", brand_id=brand_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/api-config/curl-parse", tags=["API Registry"])
+async def parse_curl_command(req: CurlParseRequest):
+    """
+    Parse a curl command and extract the method, URL, headers, and body.
+    This is a preview endpoint — use /api-config/endpoint to actually register it.
+    """
+    from core.tools.api_registry import parse_curl
+    try:
+        parsed = parse_curl(req.curl_command)
+        return {
+            "method": parsed.method,
+            "url": parsed.url,
+            "headers": parsed.headers,
+            "body": parsed.body,
+            "auth": parsed.auth,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@admin_router.post("/api-config/endpoints", tags=["API Registry"], status_code=201)
+async def register_endpoint(req: EndpointRegisterRequest):
+    """
+    Register a single API endpoint for a brand.
+
+    Either provide explicit params (method, path, etc.) or pass a `curl_command`
+    to auto-extract method, path, and body schema.
+    """
+    from core.tools.api_registry import register_brand_api, register_endpoint as reg_ep
+
+    # Resolve brand_api_config_id
+    from core.tools.api_registry import get_brand_config
+    config = get_brand_config(req.name.rsplit("_", 1)[0] if "_" in req.name else req.name)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"No API config found for brand. Call POST /admin/api-config/register first.")
+
+    try:
+        endpoint_id = reg_ep(
+            brand_api_config_id=config["id"],
+            name=req.name,
+            description=req.description,
+            method=req.method,
+            path=req.path,
+            query_params=req.query_params or [],
+            body_schema=req.body_schema,
+            response_schema=req.response_schema,
+            rate_limit_per_min=req.rate_limit_per_min,
+            requires_auth=req.requires_auth,
+            tags=req.tags,
+            curl_command=req.curl_command,
+        )
+        return {"success": True, "endpoint_id": endpoint_id, "name": req.name}
+    except Exception as e:
+        log.error("endpoint_register_failed", name=req.name, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/api-config/{brand_id}/credentials", tags=["API Registry"], status_code=201)
+async def store_credential(brand_id: str, req: CredentialStoreRequest):
+    """Store an encrypted credential (API key, bearer token, etc.) for a brand."""
+    from core.tools.api_registry import get_brand_config, store_credentials
+    from brands.registry import get_brand_by_id
+
+    # Validate brand exists
+    entry = get_brand_by_id(brand_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not registered. Call POST /admin/brands first.")
+
+    config = get_brand_config(brand_id)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"No API config for '{brand_id}'. Call POST /admin/api-config/register first.")
+
+    try:
+        cred_id = store_credentials(
+            brand_api_config_id=config["id"],
+            key_type=req.key_type,
+            key_name=req.key_name,
+            value=req.value,
+        )
+        return {"success": True, "credential_id": cred_id, "key_name": req.key_name}
+    except Exception as e:
+        log.error("credential_store_failed", brand_id=brand_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/api-config/{brand_id}/endpoints", tags=["API Registry"])
+async def list_brand_endpoints(brand_id: Annotated[str, Path(max_length=64)]):
+    """List all registered API endpoints for a brand."""
+    try:
+        brand_id = validate_brand_id(brand_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    from core.tools.api_registry import list_endpoints_for_brand
+    from brands.registry import get_brand_by_id
+
+    entry = get_brand_by_id(brand_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not found")
+
+    try:
+        endpoints = list_endpoints_for_brand(brand_id)
+        return {
+            "brand_id": brand_id,
+            "count": len(endpoints),
+            "endpoints": [
+                {
+                    "id": e.id,
+                    "name": e.name,
+                    "description": e.description,
+                    "method": e.method,
+                    "path": e.path,
+                    "tags": e.tags,
+                    "requires_auth": e.requires_auth,
+                    "rate_limit_per_min": e.rate_limit_per_min,
+                }
+                for e in endpoints
+            ],
+        }
+    except Exception as e:
+        log.error("list_endpoints_failed", brand_id=brand_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/api-config/{brand_id}/tools", tags=["API Registry"])
+async def get_brand_tools(brand_id: Annotated[str, Path(max_length=64)]):
+    """Get the LLM tool manifest for a brand — all available dynamic tools."""
+    try:
+        brand_id = validate_brand_id(brand_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    from core.tools.dynamic_builder import get_tool_manifest_summary
+    from brands.registry import get_brand_by_id
+
+    entry = get_brand_by_id(brand_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not found")
+
+    try:
+        tools = get_tool_manifest_summary(brand_id)
+        return {"brand_id": brand_id, "count": len(tools), "tools": tools}
+    except Exception as e:
+        log.error("tool_manifest_failed", brand_id=brand_id, error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/api-config/test/{endpoint_id}", tags=["API Registry"])
+async def test_endpoint(endpoint_id: str, test_params: dict | None = None):
+    """Test a registered endpoint by firing a real HTTP request."""
+    from core.tools.api_registry import test_endpoint as test_ep
+    try:
+        result = test_ep(endpoint_id, test_params)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.delete("/api-config/endpoints/{endpoint_id}", tags=["API Registry"])
+async def delete_endpoint(endpoint_id: str):
+    """Soft-delete an endpoint (marks inactive)."""
+    from core.tools.api_registry import delete_endpoint as del_ep
+    try:
+        deleted = del_ep(endpoint_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Endpoint not found")
+        return {"success": True, "endpoint_id": endpoint_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/api-config/demo/endpoints", tags=["API Registry"])
+async def list_demo_api_endpoints():
+    """
+    List all endpoints available in the built-in demo ecommerce API.
+    Use these to quickly wire the demo API into a brand without needing to curl-parse.
+    """
+    return {
+        "description": "Demo Ecommerce API — seeded with 13 brands, 65 customers, 186 orders",
+        "base_url": "http://192.168.0.105:8001",
+        "endpoints": [
+            {"name": "get_customer", "method": "GET", "path": "/api/v1/customers/{customer_id}", "tags": ["customer"], "requires_auth": False, "description": "Get customer details with optional order history"},
+            {"name": "search_customers", "method": "GET", "path": "/api/v1/customers", "tags": ["customer"], "requires_auth": False, "description": "Search customers by email or name"},
+            {"name": "get_order", "method": "GET", "path": "/api/v1/orders/{order_id}", "tags": ["orders"], "requires_auth": False, "description": "Get order details with items and shipment"},
+            {"name": "list_orders", "method": "GET", "path": "/api/v1/orders", "tags": ["orders"], "requires_auth": False, "description": "List orders filtered by customer_id or status"},
+            {"name": "get_order_status", "method": "GET", "path": "/api/v1/orders/{order_id}/status", "tags": ["orders", "wismo"], "requires_auth": False, "description": "Quick order status check for WISMO queries"},
+            {"name": "get_return", "method": "GET", "path": "/api/v1/returns/{return_id}", "tags": ["returns"], "requires_auth": False, "description": "Get return details with items"},
+            {"name": "get_refund_status", "method": "GET", "path": "/api/v1/returns/{return_id}/refund-status", "tags": ["returns", "refund"], "requires_auth": False, "description": "Quick refund status — days elapsed, overdue flag, expected date"},
+            {"name": "initiate_return", "method": "POST", "path": "/api/v1/returns", "tags": ["returns"], "requires_auth": False, "description": "Initiate a return for an order"},
+            {"name": "track_shipment", "method": "GET", "path": "/api/v1/shipments/track", "tags": ["wismo", "shipping"], "requires_auth": False, "description": "Track shipment by order_id or tracking_id"},
+            {"name": "get_promo", "method": "POST", "path": "/api/v1/promos/validate", "tags": ["promos"], "requires_auth": False, "description": "Validate promo code — body: {code, basket_value}"},
+            {"name": "account_status", "method": "GET", "path": "/api/v1/accounts/status", "tags": ["account"], "requires_auth": False, "description": "Check account status by customer_id or email"},
+        ],
+    }
+
+
+@admin_router.post("/api-config/demo/wire-brand", tags=["API Registry"])
+async def wire_demo_api_for_brand(brand_id: Annotated[str, Path(max_length=64)]):
+    """
+    One-shot wire: register the demo API for a brand and all its endpoints.
+    Use this for testing — production brands should register via curl paste or manual config.
+    """
+    from core.tools.api_registry import (
+        get_brand_config, register_brand_api,
+        register_endpoint as reg_ep, list_endpoints_for_brand,
+    )
+    from brands.registry import get_brand_by_id
+
+    entry = get_brand_by_id(brand_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"Brand '{brand_id}' not registered. Call POST /admin/brands first.")
+
+    # Register base config
+    config_id = register_brand_api(
+        brand_id=brand_id,
+        base_url="http://192.168.0.105:8001",
+        description="Demo Ecommerce API — SQLite-backed mock of real ecommerce platform",
+    )
+
+    # List existing endpoints to check what needs adding
+    existing = {e.name for e in list_endpoints_for_brand(brand_id)}
+
+    endpoints_to_add = [
+        ("get_customer", "GET", "/api/v1/customers/{customer_id}", "customer", "Get customer details by customer_id. Query: include_orders=true for order history."),
+        ("search_customers", "GET", "/api/v1/customers", "customer", "Search customers by email or name query params."),
+        ("get_order", "GET", "/api/v1/orders/{order_id}", "orders", "Get order details including items and shipment info."),
+        ("list_orders", "GET", "/api/v1/orders", "orders", "List orders. Filter by customer_id or status query params."),
+        ("get_order_status", "GET", "/api/v1/orders/{order_id}/status", "wismo", "Quick status check for WISMO."),
+        ("get_return", "GET", "/api/v1/returns/{return_id}", "returns", "Get return details."),
+        ("get_refund_status", "GET", "/api/v1/returns/{return_id}/refund-status", "refund", "Get refund status."),
+        ("initiate_return", "POST", "/api/v1/returns", "returns", "Initiate a return."),
+        ("track_shipment", "GET", "/api/v1/shipments/track", "wismo", "Track shipment by order_id or tracking_id."),
+        ("account_status", "GET", "/api/v1/accounts/status", "account", "Check customer account status."),
+    ]
+
+    registered = []
+    errors = []
+    for name, method, path, tag, description in endpoints_to_add:
+        if name in existing:
+            continue
+        try:
+            ep_id = reg_ep(
+                brand_api_config_id=config_id,
+                name=name,
+                description=description,
+                method=method,
+                path=path,
+                requires_auth=False,
+                tags=[tag],
+            )
+            registered.append({"name": name, "id": ep_id})
+        except Exception as e:
+            errors.append({"name": name, "error": str(e)})
+
+    return {
+        "success": True,
+        "brand_id": brand_id,
+        "config_id": config_id,
+        "endpoints_registered": len(registered),
+        "endpoints_skipped": len(existing),
+        "errors": errors,
+        "registered": registered,
+    }
 
 
 # Register admin router
