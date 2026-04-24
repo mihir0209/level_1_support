@@ -1,3 +1,11 @@
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Docker bootstrap only — managed by Alembic after initial migration.
+-- Alembic tracks its own version in the `alembic_version` table.
+-- This file runs on first container start; subsequent starts skip existing tables.
+-- After init.sql, docker-compose runs `alembic upgrade head` which sees
+-- alembic_version=001 and exits cleanly (no-op).
+-- ═══════════════════════════════════════════════════════════════════════════════
+
 -- Enable pgvector extension
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pg_trgm;  -- for full-text search
@@ -78,3 +86,72 @@ CREATE TABLE IF NOT EXISTS crawl_sources (
 );
 
 CREATE INDEX ON crawl_sources (brand_id);
+
+-- ═══════════════════════════════════════════════════════════════════════
+-- Brand API Registry — dynamic LLM tools per brand
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- Per-brand API configuration
+CREATE TABLE IF NOT EXISTS brand_api_config (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_id        VARCHAR(64) NOT NULL UNIQUE,
+    base_url        TEXT NOT NULL,
+    description     TEXT,
+    default_headers JSONB DEFAULT '{}',
+    is_active       BOOLEAN DEFAULT TRUE,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Individual endpoints registered for a brand
+CREATE TABLE IF NOT EXISTS registered_api_endpoints (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_api_config_id UUID NOT NULL REFERENCES brand_api_config(id) ON DELETE CASCADE,
+    name                VARCHAR(128) NOT NULL,
+    description         TEXT,
+    method              VARCHAR(8) NOT NULL,           -- GET, POST, PUT, DELETE
+    path                TEXT NOT NULL,
+    query_params        JSONB DEFAULT '[]',            -- [{name, type, required, description}]
+    body_schema         JSONB,                          -- JSON Schema for body
+    response_schema     JSONB,                          -- parsed response shape
+    rate_limit_per_min  INT,
+    requires_auth       BOOLEAN DEFAULT FALSE,
+    tags                TEXT[] DEFAULT '{}',           -- e.g. orders, returns, customer
+    is_active           BOOLEAN DEFAULT TRUE,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(brand_api_config_id, name)
+);
+
+-- Per-brand encrypted credentials
+CREATE TABLE IF NOT EXISTS brand_api_credentials (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand_api_config_id UUID NOT NULL REFERENCES brand_api_config(id) ON DELETE CASCADE,
+    key_type            VARCHAR(32) NOT NULL,  -- api_key, bearer_token, basic_auth, oauth2
+    key_name            VARCHAR(64) NOT NULL,  -- human label (e.g. "Primary API Key")
+    encrypted_value     BYTEA NOT NULL,         -- Fernet-encrypted secret
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    is_active           BOOLEAN DEFAULT TRUE,
+    UNIQUE(brand_api_config_id, key_type)
+);
+
+CREATE INDEX ON brand_api_config (brand_id);
+CREATE INDEX ON registered_api_endpoints (brand_api_config_id, is_active);
+CREATE INDEX ON brand_api_credentials (brand_api_config_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- Alembic version stamp — must match alembic/versions/001_initial_schema.py.
+-- This lets `alembic upgrade head` (run in docker-compose command) detect
+-- that the DB is already at the correct revision and exit cleanly (no-op).
+-- ═══════════════════════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS alembic_version (
+    version_num VARCHAR(32) NOT NULL,
+    CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+);
+INSERT INTO alembic_version (version_num) VALUES ('001')
+    ON CONFLICT DO NOTHING;
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- END BOOTSTRAP — Schema is managed by Alembic after this point.
+-- Run `alembic upgrade head` after container start for migration control.
+-- ═══════════════════════════════════════════════════════════════════════════════

@@ -1354,16 +1354,7 @@ async def _write_pgvector(items: list[dict], brand_id: str) -> int:
             f"password={settings.postgres_password}"
         )
         async with await psycopg.AsyncConnection.connect(conn_str) as conn:
-            # Ensure table exists with the canonical schema (matches DB migration)
-            await conn.execute(
-                "CREATE TABLE IF NOT EXISTS knowledge_chunks ("
-                "id uuid PRIMARY KEY DEFAULT gen_random_uuid(),"
-                "brand_id varchar(64) NOT NULL, chunk_type varchar(32), "
-                "source_url text, content text NOT NULL, "
-                "metadata jsonb DEFAULT '{}'::jsonb, "
-                "crawled_at timestamptz DEFAULT now(), "
-                "updated_at timestamptz DEFAULT now())"
-            )
+            # Table owned by Alembic migration 001 — no runtime creation needed
             for item in items:
                 body = str(item.get("content", "")).strip()
                 if not body:

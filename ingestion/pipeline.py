@@ -114,19 +114,8 @@ async def _upsert_to_graph(result: ValidationResult) -> bool:
 
 
 async def _ensure_review_queue_table(conn) -> None:
-    """Create resolution_review_queue if it doesn't exist."""
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS resolution_review_queue (
-            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            brand_id            VARCHAR(64) NOT NULL,
-            issue_type          VARCHAR(64),
-            resolution_tried    VARCHAR(128),
-            failure_reason      TEXT,
-            conversation        JSONB,
-            reviewed            BOOLEAN DEFAULT FALSE,
-            created_at          TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
+    """DEPRECATED — table is created by Alembic migration 001."""
+    pass  # noqa: N807
 
 
 async def _queue_for_review(results: list[ValidationResult]) -> int:
@@ -138,7 +127,7 @@ async def _queue_for_review(results: list[ValidationResult]) -> int:
         from config import settings
 
         conn = await asyncpg.connect(settings.postgres_dsn.replace("+asyncpg", ""))
-        await _ensure_review_queue_table(conn)
+        # Table owned by Alembic migration 001 — no runtime creation needed
         inserted = 0
         for r in results:
             import json as _json
@@ -163,28 +152,8 @@ async def _queue_for_review(results: list[ValidationResult]) -> int:
 
 
 async def _ensure_chunk_table(conn) -> None:
-    """Create knowledge_chunks table if it doesn't exist (supports fresh Postgres installs)."""
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS knowledge_chunks (
-            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            chunk_id    VARCHAR(128) NOT NULL UNIQUE,
-            brand_id    VARCHAR(64) NOT NULL,
-            source_url  TEXT,
-            content     TEXT NOT NULL,
-            chunk_type  VARCHAR(32),
-            embedding   vector,
-            confidence  FLOAT,
-            metadata    JSONB DEFAULT '{}',
-            crawled_at  TIMESTAMPTZ DEFAULT NOW(),
-            updated_at  TIMESTAMPTZ DEFAULT NOW()
-        )
-    """)
-    try:
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_chunks_brand ON knowledge_chunks (brand_id)"
-        )
-    except Exception:
-        pass  # index may already exist
+    """DEPRECATED — table is created by Alembic migration 001."""
+    pass  # noqa: N807
 
 
 async def _embed_and_store_faqs(results: list[ValidationResult]) -> int:
@@ -199,7 +168,7 @@ async def _embed_and_store_faqs(results: list[ValidationResult]) -> int:
 
         llm = get_llm_client()
         conn = await asyncpg.connect(settings.postgres_dsn.replace("+asyncpg", ""))
-        await _ensure_chunk_table(conn)
+        # Table owned by Alembic migration 001 — no runtime creation needed
 
         stored = 0
         for r in faq_results:

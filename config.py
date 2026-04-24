@@ -60,9 +60,11 @@ class Settings(BaseSettings):
 
     @property
     def postgres_dsn_sync(self) -> str:
+        # Always use localhost for CLI tools (alembic) running on the host machine.
+        # The async postgres_dsn uses postgres_host which may be 'postgres' (Docker DNS).
         return (
-            f"postgresql://{self.postgres_user}:{self.postgres_password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+            f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
+            f"@localhost:{self.postgres_port}/{self.postgres_db}"
         )
 
     # ── Redis (session cache) ───────────────────────────────────────────
