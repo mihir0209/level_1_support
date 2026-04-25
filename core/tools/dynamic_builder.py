@@ -27,6 +27,10 @@ from core.tools.api_registry import (
     _dec as _fernet_dec,
 )
 from core.utils.http import http_request
+from core.tracing import traced, set_span_attributes
+from core.logging_config import get_logger
+
+log = get_logger(__name__)
 
 
 # ── Tool registry ────────────────────────────────────────────────────────────
@@ -138,14 +142,32 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
         body = dict(all_params)
 
         try:
-            resp = http_request(
-                spec.method,
-                url,
-                headers=headers,
-                params=query_params or None,
-                json_body=body if body and spec.method in ("POST", "PUT", "PATCH") else None,
-                timeout=15,
-            )
+            span_name = f"tool.http.{spec.method.lower()}"
+            with get_tracer().start_as_current_span(span_name) as span:
+                set_span_attributes(
+                    span,
+                    tool_name=spec.name,
+                    http_method=spec.method,
+                    http_url=url,
+                    brand_id=brand_id_for_url,
+                    requires_auth=spec.requires_auth,
+                )
+                resp = http_request(
+                    spec.method,
+                    url,
+                    headers=headers,
+                    params=query_params or None,
+                    json_body=body if body and spec.method in ("POST", "PUT", "PATCH") else None,
+                    timeout=15,
+                )
+                set_span_attributes(span, http_status_code=resp.status_code)
+                if not resp.ok:
+                    log.warning(
+                        "tool_http_failed",
+                        tool=spec.name,
+                        status=resp.status_code,
+                        url=url,
+                    )
             if resp.ok:
                 try:
                     return json.dumps(resp.json(), indent=2)

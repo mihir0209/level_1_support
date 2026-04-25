@@ -97,6 +97,7 @@ class ReturnPolicy(BaseModel):
     excluded_categories: list[str] = Field(default_factory=list)
     effective_date: datetime
     expiry_date: datetime | None = None        # None = still active
+    refund_timeline_days: int = 14             # days for cash refund after return received
 
 
 class ShippingPolicy(BaseModel):
@@ -212,7 +213,8 @@ class ContextPackage(BaseModel):
     # Assembled context blocks (in priority order)
     system_prompt: str
     user_context_block: str            # customer tier, orders, open returns
-    policy_block: str                  # temporally-correct policy text
+    policy_block: str                  # temporally-correct return policy text
+    shipping_block: str = ""           # shipping/delivery policy (for WISMO queries)
     resolution_block: str              # resolution steps from graph
     session_block: str                 # compressed conversation history
     tool_manifest: list[str]           # tool function names available

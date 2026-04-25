@@ -267,14 +267,34 @@ def _format_policy_block(policy: dict[str, Any] | None, brand_name: str) -> str:
     if not cost_str:
         cost_str = "Free"
 
+    refund_days = policy.get("refund_timeline_days", 14)
     return (
         f"RETURN POLICY ({brand_name}):\n"
         f"  Return window: {policy.get('return_window_days', 28)} days from delivery\n"
         f"  Return cost: {cost_str}\n"
         f"  Free returns: {free_returns}\n"
         f"  Excluded items: {excluded}\n"
-        f"  Refund timeline: Up to 21 days (14 days transit + 7 days bank processing)"
+        f"  Refund timeline: Up to {refund_days} days after return is received"
     )
+
+
+def _format_shipping_block(shipping: dict[str, Any] | None, brand_name: str) -> str:
+    if not shipping:
+        return ""
+    region = shipping.get("region", "")
+    threshold = shipping.get("free_shipping_threshold")
+    threshold_str = f"£{threshold}" if threshold else "none"
+
+    lines = [
+        f"SHIPPING POLICY ({brand_name}{(' - ' + region) if region else ''}):",
+        f"  Standard delivery: {shipping.get('standard_days_min', '?')}-{shipping.get('standard_days_max', '?')} business days, £{shipping.get('standard_cost', '?')}",
+    ]
+    if shipping.get("express_available"):
+        lines.append(
+            f"  Express delivery: up to {shipping.get('express_days_max', '?')} days, £{shipping.get('express_cost', '?')}"
+        )
+    lines.append(f"  Free shipping: orders over {threshold_str}")
+    return "\n".join(lines)
 
 
 def _format_resolution_block(
@@ -449,6 +469,7 @@ async def assemble_context(
     # Build context blocks
     user_context_block = _format_user_context_block(customer, history_facts)
     policy_block = _format_policy_block(knowledge.policy, brand_name)
+    shipping_block = _format_shipping_block(knowledge.shipping_policy, brand_name)
     resolution_block = _format_resolution_block(knowledge.resolutions, knowledge.kb_items)
 
     assembly_latency_ms = (time.monotonic() - t_start) * 1000
@@ -469,6 +490,7 @@ async def assemble_context(
         system_prompt=system_prompt,
         user_context_block=user_context_block,
         policy_block=policy_block,
+        shipping_block=shipping_block,
         resolution_block=resolution_block,
         session_block=session_block,
         tool_manifest=tool_manifest,

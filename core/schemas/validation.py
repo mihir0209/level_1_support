@@ -39,8 +39,6 @@ def validate_brand_id(brand_id: str) -> str:
 
 class BrandId(str):
     """Validated brand_id — alphanumeric + underscores only, max 64 chars."""
-    __match_args__ = ("value",)
-
     def __new__(cls, value: str) -> "BrandId":
         if not BRAND_ID_PATTERN.match(value):
             raise ValueError(

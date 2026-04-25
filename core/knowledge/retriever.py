@@ -52,6 +52,7 @@ class RetrievalResult:
     source: str  # "graph_tool", "text2cypher", "kb_search"
     latency_ms: float = 0.0
     kb_items: list[dict[str, Any]] = field(default_factory=list)
+    shipping_policy: dict[str, Any] | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -123,7 +124,8 @@ def get_return_policy(
                p.return_cost_usd AS cost_usd,
                p.free_return_condition AS free_condition,
                p.excluded_categories AS excluded,
-               p.effective_date AS effective_date
+               p.effective_date AS effective_date,
+               p.refund_timeline_days AS refund_timeline_days
         ORDER BY hp.effectiveDate DESC
         LIMIT 1
         """,
@@ -146,6 +148,7 @@ def get_return_policy(
         "free_return_condition": row[3],
         "excluded_categories": excluded or [],
         "effective_date": row[5],
+        "refund_timeline_days": row[6] if len(row) > 6 else 14,
     }
 
 
@@ -398,12 +401,19 @@ def retrieve_knowledge(
     Pattern A: pre-built IssueType→Resolution paths (fast, high-confidence).
     Pattern B (Text2Cypher): LLM generates a Cypher query for novel/unmatched queries.
     Pattern C: keyword search across collected KB nodes as last resort.
+
+    Also retrieves shipping policy for WISMO/delivery intent types.
     """
     import time
     t0 = time.monotonic()
 
     resolutions = get_resolutions_for_issue(brand_id, issue_type_id)
     policy = get_return_policy(brand_id, order_placed_at)
+
+    # Shipping policy is needed for WISMO and delivery queries
+    shipping_policy: dict[str, Any] | None = None
+    if issue_type_id in ("wismo", "delivery_query"):
+        shipping_policy = get_shipping_policy(brand_id, region, order_placed_at)
 
     kb_items: list[dict] = []
 
@@ -431,6 +441,7 @@ def retrieve_knowledge(
         issue_type=issue_type_id,
         resolution_count=len(resolutions),
         kb_items=len(kb_items),
+        has_shipping=shipping_policy is not None,
         latency_ms=round(latency_ms, 1),
     )
     return RetrievalResult(
@@ -440,4 +451,5 @@ def retrieve_knowledge(
         source=source,
         latency_ms=latency_ms,
         kb_items=kb_items,
+        shipping_policy=shipping_policy,
     )

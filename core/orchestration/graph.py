@@ -218,12 +218,18 @@ def _build_llm_messages(state: L1SupportState) -> list:
         return [HumanMessage(content="Hello, I need help.")]
 
     # Build structured system message from ContextPackage blocks
-    system_content = "\n\n".join([
+    system_content = "\n\n".join(filter(None, [
         ctx.system_prompt,
         "---",
         ctx.user_context_block,
         "---",
+        "IMPORTANT POLICY RULES:",
+        "  - When a customer asks to return an item, ALWAYS check the 'Excluded items' list in the policy block first.",
+        "  - If the item category is listed in excluded items, state clearly that it CANNOT be returned before any other information.",
+        "  - Always give accurate timelines. Do NOT guess days — use the numbers in the policy block.",
+        "---",
         ctx.policy_block,
+        ctx.shipping_block or None,
         "---",
         ctx.resolution_block,
         "---",
@@ -241,7 +247,7 @@ def _build_llm_messages(state: L1SupportState) -> list:
         "[RESOLVED]",
         "Do NOT add this signal unless the issue is genuinely resolved. "
         "If the customer thanks you or confirms they're satisfied, the issue is resolved.",
-    ])
+    ]))
 
     messages = [SystemMessage(content=system_content)]
 

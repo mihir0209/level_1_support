@@ -145,6 +145,8 @@ def configure_logging(
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-def get_logger(name: str) -> structlog.stdlib.BoundLogger:
+from structlog._config import BoundLoggerLazyProxy
+
+def get_logger(name: str) -> BoundLoggerLazyProxy:
     """Get a bound logger for a module."""
     return structlog.get_logger(name)

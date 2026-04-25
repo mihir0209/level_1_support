@@ -120,6 +120,7 @@ RETURN_POLICIES: list[ReturnPolicy] = [
         free_return_condition=None,
         excluded_categories=["swimwear", "lingerie", "cosmetics", "pierced jewellery"],
         effective_date=_POLICY_DATE,
+        refund_timeline_days=14,
     ),
     ReturnPolicy(
         brand_id="boohooman_uk", return_window_days=28,
@@ -595,14 +596,26 @@ def upsert_return_policy(graph, policy: ReturnPolicy) -> None:
     graph.query(
         """
         MERGE (p:ReturnPolicy {id: $id})
-        SET p.brand_id = $brand_id,
+        ON CREATE SET
+            p.brand_id = $brand_id,
             p.return_window_days = $return_window_days,
             p.return_cost_gbp = $return_cost_gbp,
             p.return_cost_usd = $return_cost_usd,
             p.free_return_condition = $free_return_condition,
             p.excluded_categories = $excluded_categories,
             p.effective_date = $effective_date,
-            p.expiry_date = $expiry_date
+            p.expiry_date = $expiry_date,
+            p.refund_timeline_days = $refund_timeline_days
+        ON MATCH SET
+            p.brand_id = $brand_id,
+            p.return_window_days = $return_window_days,
+            p.return_cost_gbp = $return_cost_gbp,
+            p.return_cost_usd = $return_cost_usd,
+            p.free_return_condition = $free_return_condition,
+            p.excluded_categories = $excluded_categories,
+            p.effective_date = $effective_date,
+            p.expiry_date = $expiry_date,
+            p.refund_timeline_days = $refund_timeline_days
         WITH p
         MATCH (b:Brand {id: $brand_id})
         MERGE (b)-[:HAS_POLICY {type: 'return', effectiveDate: $effective_date}]->(p)
@@ -616,6 +629,7 @@ def upsert_return_policy(graph, policy: ReturnPolicy) -> None:
             "excluded_categories": policy.excluded_categories,
             "effective_date": policy.effective_date.isoformat(),
             "expiry_date": policy.expiry_date.isoformat() if policy.expiry_date else None,
+            "refund_timeline_days": policy.refund_timeline_days,
         },
     )
 

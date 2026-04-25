@@ -84,8 +84,21 @@ async def run_specialist(
 
     Swarms agents are synchronous — run in executor to avoid blocking the event loop.
     Returns the agent's final response string.
+
+    Dynamic tools are loaded from the registered API registry and injected into
+    the agent at runtime, giving it real customer/order/return data for this brand.
     """
     import asyncio
+
+    # Load dynamic brand-specific tools from API registry
+    dynamic_tools = []
+    try:
+        from core.tools.dynamic_builder import load_tools_for_brand
+        dynamic_tools = load_tools_for_brand(brand_id)
+        if dynamic_tools:
+            _inject_dynamic_tools(agent, dynamic_tools)
+    except Exception:
+        pass  # No dynamic tools available — proceed with static tools only
 
     context_prefix = f"[Brand: {brand_id}]"
     if customer_id:
@@ -99,3 +112,23 @@ async def run_specialist(
     except Exception as exc:
         log.error("specialist_agent_failed", agent=agent.agent_name, error=str(exc))
         raise
+
+
+def _inject_dynamic_tools(agent: Any, tools: list) -> None:
+    """
+    Inject dynamic tools into a Swarms agent at runtime.
+    Handles Swarms Agent's internal tool storage mechanism.
+    """
+    # Swarms Agent stores tools as agent.tools (list) and/or agent.agent_tools (list)
+    existing = getattr(agent, "tools", []) or []
+    tool_names = {getattr(t, "name", str(t)) for t in existing}
+
+    for t in tools:
+        name = getattr(t, "name", str(t))
+        if name not in tool_names:
+            existing.append(t)
+            tool_names.add(name)
+
+    agent.tools = existing
+    if hasattr(agent, "agent_tools"):
+        agent.agent_tools = existing
