@@ -9,7 +9,7 @@ from typing import Annotated, Any
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from core.ontology.models import Channel, ContextPackage, Customer, IntentResult, SessionOutcome
 
@@ -59,5 +59,4 @@ class L1SupportState(BaseModel):
     outcome: SessionOutcome | None = None
     satisfaction: float | None = None   # 0.0–1.0 CSAT score
 
-    class Config:
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(arbitrary_types_allowed=True)

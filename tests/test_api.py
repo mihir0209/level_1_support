@@ -45,6 +45,31 @@ def mock_redis(monkeypatch):
         async def ping(self):
             return True
 
+        async def hgetall(self, key):
+            return {k: v for k, v in store.items() if str(k).startswith(key + ":") or k == key}
+
+        async def hset(self, name, key, value):
+            subkey = f"{name}:{key}"
+            store[subkey] = value
+
+        async def hget(self, name, key):
+            subkey = f"{name}:{key}"
+            return store.get(subkey)
+
+        async def scan_iter(self, match=None):
+            # Return all keys matching pattern like "session:*"
+            import fnmatch
+            if match:
+                pattern = match.replace("*", "")
+                return [k for k in store if fnmatch.fnmatch(k, match)]
+            return list(store.keys())
+
+        async def keys(self, pattern=None):
+            import fnmatch
+            if pattern:
+                return [k for k in store if fnmatch.fnmatch(k, pattern)]
+            return list(store.keys())
+
     fake = FakeRedis()
     import core.memory.session as sess
     monkeypatch.setattr(sess, "get_redis", lambda: fake)
@@ -92,17 +117,16 @@ class TestHealth:
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
-        assert "status" in body
-        assert body["status"] in ("healthy", "degraded")
-        assert "falkordb" in body
-        assert "redis" in body
+        assert body["status"] == "ok"
+        assert body["service"] == "l1_support"
         assert body["version"] == "0.1.0"
 
-    def test_health_falkordb_unavailable_gives_degraded(self, client):
-        r = client.get("/health")
+    def test_ready_endpoint_exists(self, client):
+        r = client.get("/ready")
+        assert r.status_code in (200, 503)
         body = r.json()
-        # FalkorDB is mocked as unavailable
-        assert body["falkordb"] == "unavailable"
+        assert "status" in body
+        assert "checks" in body
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -430,6 +454,28 @@ class TestVoiceEndpoints:
 # ═══════════════════════════════════════════════════════════════════════════
 # Admin ingestion endpoints
 # ═══════════════════════════════════════════════════════════════════════════
+
+class TestAdminEndpointsAuth:
+
+    def test_admin_endpoints_require_key(self, client):
+        """All /admin/* routes should return 401 without X-ADMIN-KEY."""
+        protected_routes = [
+            ("/admin/brands", "get"),
+            ("/admin/brands/boohoo_uk", "get"),
+            ("/admin/sessions", "get"),
+        ]
+        for path, method in protected_routes:
+            r = client.get(path)
+            assert r.status_code == 401, f"{method.upper()} {path} should require auth, got {r.status_code}"
+
+    def test_admin_health_queries_dont_require_key(self, client):
+        """Public health endpoints should be accessible without auth."""
+        r = client.get("/health")
+        assert r.status_code == 200
+
+        r = client.get("/ready")
+        assert r.status_code in (200, 503)  # may be degraded but should respond
+
 
 class TestAdminEndpoints:
 

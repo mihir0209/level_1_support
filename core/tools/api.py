@@ -123,7 +123,6 @@ def list_customers(
     brand_id: str | None = Query(
         default=None,
         description="Filter by brand_id. Call `GET /api/v1/brands` to see all valid brand_ids (e.g. `boohoo_uk`, `plt_uk`, `karenmillen_uk`).",
-        example="boohoo_uk",
     ),
     limit: int = Query(default=50, le=200),
     _auth: str = Depends(verify_api_key),
@@ -163,7 +162,6 @@ def list_customers(
 def get_customer(
     customer_id: str = Path(
         description="Customer ID. Demo values: `cust_001`, `cust_002`, `cust_003`.",
-        example="cust_001",
     ),
     _auth: str = Depends(verify_api_key),
 ):
