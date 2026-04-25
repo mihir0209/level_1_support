@@ -44,7 +44,7 @@ def _build_tool_func(spec: APIToolSpec) -> Callable:
 
     The function name, docstring, and parameters are all derived from the spec.
     """
-    # Build a safe function name
+    # Build a safe function name from base spec name
     safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", spec.name)
 
     # Build docstring
@@ -74,17 +74,17 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
             with conn:
                 with conn.cursor() as cur:
                     cur.execute("""
-                        SELECT c.base_url, c.default_headers
+                        SELECT c.base_url, c.default_headers, c.brand_id
                         FROM brand_api_config c
                         JOIN registered_api_endpoints e ON e.brand_api_config_id = c.id
                         WHERE e.name = %(name)s AND e.is_active = true AND c.is_active = true
                         LIMIT 1
-                    """, {"name": endpoint_name})
+                    """, {"name": tool_name})
 
                     row = cur.fetchone()
                     if not row:
-                        return f"Error: brand API config not found for {endpoint_name}"
-                    base_url, default_headers_raw = row
+                        return f"Error: brand API config not found for {tool_name}"
+                    base_url, default_headers_raw, brand_id_for_url = row
                     headers = json.loads(default_headers_raw) if default_headers_raw else {}
         finally:
             conn.close()
@@ -95,7 +95,7 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
         all_params.update(kw)
 
         if spec.requires_auth:
-            cred = _get_credential_for_spec(endpoint_name)
+            cred = _get_credential_for_spec(tool_name)
             if cred:
                 if cred["type"] == "bearer":
                     headers["Authorization"] = f"Bearer {cred['value']}"
@@ -105,21 +105,6 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
                     import base64
                     encoded = base64.b64encode(f"{cred['username']}:{cred['password']}".encode()).decode()
                     headers["Authorization"] = f"Basic {encoded}"
-
-        # Look up brand_id for brand-prefixed APIs
-        conn = _get_pool()
-        try:
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT c.brand_id FROM brand_api_config c
-                        JOIN registered_api_endpoints e ON e.brand_api_config_id = c.id
-                        WHERE e.name = %(name)s AND c.is_active = true
-                    """, {"name": endpoint_name})
-                    row = cur.fetchone()
-                    brand_id_for_url = row[0] if row else ""
-        finally:
-            conn.close()
 
         # Build URL — substitute path params, handle brand-prefixed APIs
         path = spec.path or "/"

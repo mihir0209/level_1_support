@@ -21,14 +21,15 @@ Edge routing:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any, Literal
 
 import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool as lc_tool
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode
 
 from config import settings
 from core.context.engine import assemble_context
@@ -38,6 +39,101 @@ from core.orchestration.llm import get_llm_client
 from core.orchestration.state import L1SupportState
 from core.tools.registry import ALL_TOOLS, TOOL_REGISTRY
 from core.memory.mempalace_client import mempalace
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# STATEFUL TOOL NODE — resolves tools from state at invoke time
+# ─────────────────────────────────────────────────────────────────────────
+
+class StatefulToolNode:
+    """
+    Tool executor that reads available tools from L1SupportState at invoke time,
+    rather than being pre-bound at graph-build time. This allows the active tool
+    set to differ per brand and per turn (static TOOL_REGISTRY + dynamic API tools).
+    """
+
+    def __init__(self, static_tools: list | None = None):
+        self.static_tools = static_tools or ALL_TOOLS
+
+    def _resolve_tools(self, state: L1SupportState) -> list:
+        """Resolve the full tool list from state: static registry + dynamic tools."""
+        manifest = state.context_package.tool_manifest if state.context_package else []
+        tool_map: dict[str, Any] = {t.name: t for t in self.static_tools}
+
+        # Overlay dynamic tools (brand-API tools keyed by brand_id_* prefix)
+        if state.dynamic_tools:
+            for t in state.dynamic_tools:
+                name = getattr(t, "name", "") or ""
+                tool_map[name] = t
+                # Also register the stripped name so manifest lookups work
+                if "_" in name:
+                    stripped = name.split("_", 1)[1]
+                    if stripped not in tool_map:
+                        tool_map[stripped] = t
+
+        return [tool_map[n] for n in manifest if n in tool_map]
+
+    def invoke(self, state: L1SupportState) -> dict[str, Any]:
+        """
+        Execute tool calls from the last AIMessage in state.
+
+        Mimics langgraph.prebuilt.ToolNode behavior:
+        - Finds tool calls in the latest AIMessage
+        - Invokes each tool, collecting results as ToolMessages
+        - Returns updated messages list
+        """
+        # Resolve which tools are active for this brand/intent
+        available = self._resolve_tools(state)
+
+        # Find last AIMessage with tool calls
+        last_ai: AIMessage | None = None
+        for msg in reversed(state.messages):
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                last_ai = msg
+                break
+
+        if not last_ai or not last_ai.tool_calls:
+            return {"messages": []}
+
+        tool_messages: list[ToolMessage] = []
+        for call in last_ai.tool_calls:
+            tool_name = call.get("name")
+            tool_args = call.get("args") or {}
+            tool_id = call.get("id", "")
+
+            selected = next((t for t in available if getattr(t, "name", "") == tool_name), None)
+            if not selected:
+                tool_messages.append(ToolMessage(
+                    content=f"Tool '{tool_name}' not found.",
+                    tool_call_id=tool_id,
+                    name=tool_name,
+                ))
+                continue
+
+            try:
+                if asyncio.iscoroutinefunction(selected.invoke):
+                    # Run sync for now (dynamic tools are sync)
+                    result = selected.invoke(tool_args)
+                else:
+                    result = selected.invoke(tool_args)
+                content = result if isinstance(result, str) else str(result)
+            except Exception as exc:
+                content = f"Tool execution failed: {exc}"
+
+            tool_messages.append(ToolMessage(
+                content=content,
+                tool_call_id=tool_id,
+                name=tool_name,
+            ))
+
+        return {"messages": tool_messages}
+
+    async def ainvoke(self, state: L1SupportState) -> dict[str, Any]:
+        """Async entry point — delegate to sync invoke (all tools are sync for now)."""
+        import asyncio
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self.invoke(state))
+
 
 log = structlog.get_logger(__name__)
 
@@ -103,12 +199,36 @@ async def node_assemble_context(state: L1SupportState) -> dict[str, Any]:
     intent_conf = context_package.intent.confidence if context_package.intent else 0.0
     effective_conf = max(intent_conf, context_package.retrieval_confidence)
 
+    # ── Load dynamic brand tools once per session ──────────────────────
+    # Loaded here (first turn) and reused via the state field across all turns.
+    # `dynamic_tools` is only appended-to by LangGraph's add_messages reducer,
+    # so it accumulates once — subsequent turns find it already populated.
+    dynamic_tools: list[Any] = []
+    if not state.dynamic_tools:
+        try:
+            from core.tools.dynamic_builder import load_tools_for_brand
+            dynamic_tools = load_tools_for_brand(state.brand_id)
+            log.info(
+                "dynamic_tools_loaded",
+                session_id=state.session_id,
+                brand_id=state.brand_id,
+                count=len(dynamic_tools),
+            )
+        except Exception as e:
+            log.warning(
+                "dynamic_tools_load_failed",
+                session_id=state.session_id,
+                brand_id=state.brand_id,
+                error=str(e),
+            )
+
     return {
         "context_package": context_package,
         "intent": context_package.intent,
         "entities": context_package.entities,
         "confidence": effective_conf,
         "turn_count": state.turn_count + 1,
+        "dynamic_tools": dynamic_tools,
     }
 
 
@@ -217,6 +337,15 @@ def _build_llm_messages(state: L1SupportState) -> list:
     if not ctx:
         return [HumanMessage(content="Hello, I need help.")]
 
+    # Merge static manifest names with dynamically-loaded tool base names
+    manifest_names = list(ctx.tool_manifest) if ctx.tool_manifest else []
+    if state.dynamic_tools:
+        for t in state.dynamic_tools:
+            name = getattr(t, "name", "") or ""
+            stripped = name.split("_", 1)[1] if "_" in name else name
+            if stripped not in manifest_names and name not in manifest_names:
+                manifest_names.append(stripped)
+
     # Build structured system message from ContextPackage blocks
     system_content = "\n\n".join(filter(None, [
         ctx.system_prompt,
@@ -233,7 +362,7 @@ def _build_llm_messages(state: L1SupportState) -> list:
         "---",
         ctx.resolution_block,
         "---",
-        f"AVAILABLE TOOLS: {', '.join(ctx.tool_manifest)}",
+        f"AVAILABLE TOOLS: {', '.join(manifest_names)}",
         "---",
         "CURRENT SESSION CONTEXT:",
         ctx.session_block,
@@ -298,6 +427,20 @@ async def node_generate_response(state: L1SupportState) -> dict[str, Any]:
 
     available_tool_names = state.context_package.tool_manifest if state.context_package else []
     available_tools = [t for name, t in TOOL_REGISTRY.items() if name in available_tool_names]
+
+    # Merge in dynamic brand-API tools; their names in the manifest are the base
+    # spec names (e.g. "get_order") — dynamic tools are prefixed at binding time
+    # so we match by checking if a dynamic tool's base name appears in manifest.
+    if state.dynamic_tools:
+        for dyn_t in state.dynamic_tools:
+            base_name = getattr(dyn_t, "name", "") or ""
+            # Strip brand_id prefix if present: "boohoo_uk_get_order" → "get_order"
+            if "_" in base_name:
+                stripped = base_name.split("_", 1)[1]
+            else:
+                stripped = base_name
+            if stripped in available_tool_names or base_name in available_tool_names:
+                available_tools.append(dyn_t)
 
     if available_tools:
         model_with_tools = lc_client.bind_tools(available_tools)
@@ -609,7 +752,7 @@ def build_graph() -> StateGraph:
     builder.add_node("assemble_context", node_assemble_context)
     builder.add_node("route_to_agent", node_route_to_agent)
     builder.add_node("generate_response", node_generate_response)
-    builder.add_node("tools", ToolNode(ALL_TOOLS))      # LangGraph's built-in tool executor
+    builder.add_node("tools", StatefulToolNode(static_tools=ALL_TOOLS))
     builder.add_node("escalate", node_escalate)
     builder.add_node("close", node_close_session)
 

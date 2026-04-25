@@ -53,6 +53,9 @@ class L1SupportState(BaseModel):
     specialist_response: str | None = None  # output from specialist agent (already includes tools)
     specialist_used: bool = False          # whether a specialist ran this turn
 
+    # ── Dynamic tools (loaded once per session from API registry) ──────
+    dynamic_tools: Annotated[list[Any], add_messages] = Field(default_factory=list)
+
     # ── Outcome ────────────────────────────────────────────────────────
     is_resolved: bool = False
     escalation_reason: str | None = None
