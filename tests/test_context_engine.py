@@ -65,7 +65,7 @@ def test_format_policy_block_full():
     assert "28 days" in result
     assert "£1.99" in result
     assert "swimwear" in result
-    assert "21 days" in result   # refund timeline
+    assert "14 days" in result   # refund timeline
 
 
 def test_format_policy_block_premium_free_returns():
