@@ -419,11 +419,14 @@ def retrieve_knowledge(
 
     if not resolutions and query_text:
         # Try Text2Cypher first (Pattern B) — uses LLM to generate a targeted graph query
+        # Note: this runs in the thread pool so we use asyncio.run() instead of get_event_loop()
         if llm_client is not None:
             import asyncio
-            kb_items = asyncio.get_event_loop().run_until_complete(
-                text2cypher_search(query_text, brand_id, llm_client)
-            )
+            try:
+                kb_items = asyncio.run(text2cypher_search(query_text, brand_id, llm_client))
+            except RuntimeError as exc:
+                log.warning("text2cypher_skipped", reason=str(exc), brand_id=brand_id)
+                kb_items = []
             if kb_items:
                 log.info("text2cypher_hit", brand_id=brand_id, items=len(kb_items))
 

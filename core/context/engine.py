@@ -54,6 +54,7 @@ _TOOL_MANIFEST: dict[str, list[str]] = {
     "size_query":        ["size_guide", "catalog_lookup"],
     "account_locked":    ["account_status", "escalate"],
     "delivery_query":    ["policy_lookup", "shipment_track"],
+    "info":             ["faq_search", "policy_search"],
     "unknown":           ["escalate"],
 }
 
@@ -139,6 +140,14 @@ async def classify_intent(
 Known issue types (use these exact IDs):
 {json.dumps(known_issue_types, indent=2)}
 
+Use "info" when the customer asks general questions like:
+  - "where can I find FAQs?" / "how do I track my order?" / "what is your return policy?"
+  - "what payment methods do you accept?" / "do you deliver to [country]?"
+  - "how do I apply a promo code?" / "what sizes do you have?"
+  - Any general question about brand policies, delivery, returns, sizing, or account help
+
+Use "unknown" ONLY if the message is incoherent, hostile, or completely off-topic.
+
 Recent conversation:
 {history_text}
 
@@ -149,7 +158,7 @@ Respond with ONLY valid JSON (no markdown):
 {{
   "issue_type": "<one of the known issue types, or 'unknown'>",
   "confidence": <float 0.0-1.0>,
-  "category": "<order|return|payment|product|account|promotions|delivery>",
+  "category": "<order|return|payment|product|account|promotions|delivery|info>",
   "entities": {{
     "order_id": "<if mentioned, else null>",
     "product_sku": "<if mentioned, else null>",
@@ -168,10 +177,15 @@ Respond with ONLY valid JSON (no markdown):
 
     try:
         data = json.loads(response.strip())
+        raw_category = data.get("category", "order")
+        try:
+            category = IssueCategory(raw_category)
+        except ValueError:
+            category = IssueCategory.ORDER
         return IntentResult(
             issue_type=data.get("issue_type", "unknown"),
             confidence=float(data.get("confidence", 0.5)),
-            category=IssueCategory(data.get("category", "order")),
+            category=category,
             entities={k: v for k, v in data.get("entities", {}).items() if v is not None},
         )
     except (json.JSONDecodeError, ValueError) as e:

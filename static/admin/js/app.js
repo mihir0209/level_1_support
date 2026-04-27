@@ -23,6 +23,7 @@ function app() {
     activeTab: 'demo',
     theme: localStorage.getItem('theme') || 'light',
     healthOk: false,
+    adminKey: 'l1support-demo-key-2026',
 
     navTabs: [
       { id: 'demo',         label: 'Support Demo' },
@@ -209,6 +210,13 @@ function app() {
       const headers = { ...(opts.headers || {}) };
       let body = opts.body;
 
+      if (path.startsWith('/admin')) {
+        headers['X-ADMIN-KEY'] = this.adminKey;
+      }
+      if (path.startsWith('/api/v1')) {
+        headers['X-API-KEY'] = this.adminKey;
+      }
+
       if (hasBody && !opts.formData) {
         headers['Content-Type'] = 'application/json';
       } else if (opts.formData) {
@@ -255,7 +263,7 @@ function app() {
     async checkHealth() {
       try {
         const h = await this.api('/health');
-        this.healthOk = h.status === 'healthy';
+        this.healthOk = h.status === 'ok' || h.status === 'healthy';
         this.services = [
           { name: 'L1 API',        type: 'service', status: 'up', detail: window.location.origin },
           { name: 'FalkorDB',       type: 'graph',   status: h.falkordb === 'ok' ? 'up' : 'down', detail: h.falkordb || 'unavailable' },
@@ -284,14 +292,14 @@ function app() {
         try {
           await this.api('/admin/brands/' + this.selectedBrand + '/demo-data', {
             method: 'POST',
-            headers: { 'X-API-KEY': 'l1support-demo-key-2026' },
           });
-        } catch (_) {}
+        } catch (e) { this.toast('Seed failed: ' + e.message, 'toast-error'); }
         // Load customers for this brand
         try {
-          const cd = await this.api('/api/v1/customers?brand_id=' + this.selectedBrand, { headers: { 'X-API-KEY': 'l1support-demo-key-2026' } });
+          const cd = await this.api('/api/v1/customers?brand_id=' + this.selectedBrand);
           this.customers = (cd.customers || []).map(c => ({ ...c, id: c.customer_id || c.id }));
-        } catch (_) {}
+          if (!this.customers.length) this.toast('No customers found for ' + this.selectedBrand, 'toast-warning');
+        } catch (e) { this.toast('Customer load failed: ' + e.message, 'toast-error'); }
 
         const data = await this.api('/session/new', {
           method: 'POST',
@@ -311,7 +319,7 @@ function app() {
     async loadCustomerContext() {
       if (!this.selectedCustomer) { this.customerContext = null; return; }
       try {
-        const d = await this.api('/api/v1/customers/' + this.selectedCustomer, { headers: { 'X-API-KEY': 'l1support-demo-key-2026' } });
+        const d = await this.api('/api/v1/customers/' + this.selectedCustomer);
         this.customerContext = d;
       } catch (_) { this.customerContext = null; }
     },
@@ -497,7 +505,6 @@ function app() {
       try {
         this.seedResult = await this.api('/admin/brands/' + brandId + '/demo-data', {
           method: 'POST',
-          headers: { 'X-API-KEY': 'l1support-demo-key-2026' },
         });
         this.toast('Demo data seeded for ' + brandId, 'toast-success');
       } catch (e) { this.toast('Seed failed: ' + e.message, 'toast-error'); }
@@ -514,7 +521,7 @@ function app() {
         for (const f of input.files) form.append('files', f);
         await fetch(window.location.origin + '/admin/brands/' + this.mgmtBrandId + '/documents/upload', {
           method: 'POST',
-          headers: { 'X-API-KEY': 'l1support-demo-key-2026' },
+          headers: { 'X-ADMIN-KEY': this.adminKey },
           body: form,
         });
         this.toast('Documents uploaded and ingested', 'toast-success');

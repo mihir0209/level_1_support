@@ -300,6 +300,109 @@ def promo_validate(promo_code: str, brand_id: str, basket_value: float = 0.0) ->
 
 
 @tool
+def faq_search(query: str, brand_id: str) -> dict[str, Any]:
+    """
+    Search the brand's FAQ knowledge base for answers to general questions.
+
+    Use this when customers ask about:
+    - How to contact us, opening hours
+    - How to track, return, or exchange an order
+    - Account help (reset password, update details)
+    - Sizing, stock availability, sale info
+    - Payment methods accepted
+    - Delivery times and costs
+    """
+    log.info("tool_called", tool="faq_search", query=query, brand_id=brand_id)
+
+    # Pull from the seeded FAQ KB in FalkorDB (if available)
+    try:
+        from core.knowledge.retriever import search_kb_nodes
+        kb_results = search_kb_nodes(brand_id, query, intent_category="faq")
+        if kb_results:
+            return {"found": True, "kb_results": kb_results, "answer": None}
+    except Exception as exc:
+        log.warning("faq_kb_fallback", error=str(exc))
+
+    # Fallback: static mock FAQs
+    _FAQS: dict[str, list[dict]] = {
+        "boohoo_uk": [
+            {"question": "How do I return an item?", "answer": "Log into your account, go to 'My Orders', select the order and click 'Return Item'. Pack the item, attach the prepaid label (for UK orders), and drop it off at any Evri parcel point. Refunds are processed within 3-5 business days of receipt."},
+            {"question": "How long does delivery take?", "answer": "Standard delivery: 3-5 working days (£3.99). Next day delivery available for £5.99. Free standard delivery on orders over £35."},
+            {"question": "How do I track my order?", "answer": "Log into your account and go to 'My Orders'. Click 'Track' next to your order. You'll receive a tracking link via email once dispatched."},
+            {"question": "What payment methods do you accept?", "answer": "We accept Visa, Mastercard, American Express, PayPal, Klarna, Laybuy, and Boohoo gift cards."},
+            {"question": "How do I apply a promo code?", "answer": "Enter your code at the checkout page in the 'Gift card or discount code' box and click 'Apply'. Only one promo code can be used per order unless stated otherwise."},
+        ],
+        "plt_uk": [
+            {"question": "How do I return an item?", "answer": "Visit our returns portal at plt.co.uk/returns, enter your order number and email, then follow the steps to generate a prepaid return label. Returns are free for loyalty members."},
+            {"question": "What is your returns policy?", "answer": "We accept returns within 28 days of delivery. Items must be unworn with original tags attached. Sale items can be returned within 14 days."},
+            {"question": "How can I track my order?", "answer": "You'll receive a tracking number via SMS and email once your order is dispatched. You can also track via your account 'My Orders' page."},
+        ],
+    }
+
+    brand_faqs = _FAQS.get(brand_id, _FAQS.get("boohoo_uk", []))
+    if query:
+        import re
+        query_lower = query.lower()
+        scored = []
+        for faq in brand_faqs:
+            q_words = set(re.findall(r'\w+', faq["question"].lower()))
+            a_words = set(re.findall(r'\w+', faq["answer"].lower()))
+            combined = q_words | a_words
+            score = sum(1 for w in query_lower.split() if w in combined)
+            scored.append((score, faq))
+        scored.sort(reverse=True)
+        results = [{"question": q, "answer": a, "score": s} for s, q, a in scored[:3] if s > 0]
+        if results:
+            faqs = "\n\n".join(f"Q: {r['question']}\nA: {r['answer']}" for r in results)
+            return {"found": True, "results": results, "answer": faqs}
+
+    return {
+        "found": False,
+        "results": [],
+        "answer": None,
+        "message": "No specific FAQ found for your query. Please contact our customer service team or ask me a more specific question.",
+    }
+
+
+@tool
+def policy_search(policy_type: str, brand_id: str) -> dict[str, Any]:
+    """
+    Retrieve the brand's policy for a specific topic.
+
+    policy_type: one of "return", "delivery", "payment", "account", "privacy", "sizing"
+    """
+    log.info("tool_called", tool="policy_search", policy_type=policy_type, brand_id=brand_id)
+
+    _POLICIES: dict[str, dict[str, str]] = {
+        "boohoo_uk": {
+            "return": "RETURN POLICY — Boohoo UK:\n• Return window: 28 days from delivery\n• Return cost: £1.99 (deducted from refund) — FREE for loyalty members\n• How to return: Log into boohoo.com, go to My Account > My Orders > Return Item. Attach the prepaid label and drop off at any Evri point.\n• Refund timeline: 3-5 business days after we receive your item\n• Non-returnable: swimwear, lingerie, pierced jewellery, beauty products (if seal broken), personalised items, sale items (unless faulty)\n• Exchanges: We don't offer direct exchanges. Return for a refund and place a new order.",
+            "delivery": "DELIVERY POLICY — Boohoo UK:\n• Standard delivery: 3-5 working days — £3.99 (free on orders over £35)\n• Next day delivery: Order by 10pm — £5.99\n• Nominated day delivery: Choose your day — £5.99\n• Collection: Collect from over 900 Evri points — £2.99\n• Weekend delivery: Friday-Sunday — £7.99\n• International: Available to 90+ countries, rates at checkout",
+            "payment": "PAYMENT POLICY — Boohoo UK:\n• We accept: Visa, Mastercard, American Express, PayPal, Klarna (buy now pay later), Laybuy (pay in 6 instalments), Boohoo gift cards\n• Klarna: Repayment is between you and Klarna. If we issue a refund, Klarna will be notified automatically.\n• Gift cards: Can be used alongside other payment methods.",
+        },
+        "plt_uk": {
+            "return": "RETURN POLICY — PrettyLittleThing UK:\n• Return window: 28 days (14 days for sale items)\n• Return cost: £1.99 — FREE for PLT loyalty members\n• How to return: Use the returns portal at plt.co.uk/returns\n• Refund timeline: 5-7 business days after receipt\n• Non-returnable: Swimwear, lingerie, pierced jewellery, beauty products (seal broken), personalised items",
+            "delivery": "DELIVERY POLICY — PrettyLittleThing UK:\n• Standard delivery: 4-6 working days — £3.99\n• Express delivery: 2-3 working days — £5.99\n• Next day delivery: Order before 3pm — £7.99\n• Free delivery for PLT Pro members",
+        },
+        "karenmillen_uk": {
+            "return": "RETURN POLICY — Karen Millen UK:\n• Return window: 28 days\n• Return cost: FREE (complimentary returns for all customers)\n• How to return: Use the prepaid label inside your parcel or generate one at karenmillen.com/returns\n• Refund timeline: 3-5 business days\n• Non-returnable: Swimwear, lingerie, pierced jewellery, altered items",
+            "delivery": "DELIVERY POLICY — Karen Millen UK:\n• Standard delivery: 3-5 working days — FREE on orders over £50, otherwise £3.95\n• Express delivery: Next working day — £7.95\n• Named day delivery: £9.95\n• Collect from store: Free at 300+ locations",
+        },
+    }
+
+    brand_policies = _POLICIES.get(brand_id, _POLICIES.get("boohoo_uk", {}))
+    policy_text = brand_policies.get(policy_type)
+
+    if policy_text:
+        return {"found": True, "policy_type": policy_type, "policy": policy_text}
+    return {
+        "found": False,
+        "policy_type": policy_type,
+        "policy": None,
+        "message": f"No {policy_type} policy found for this brand.",
+    }
+
+
+@tool
 def size_guide(product_category: str, brand_id: str) -> dict[str, Any]:
     """
     Retrieve size guide information for a product category.
@@ -369,6 +472,8 @@ TOOL_REGISTRY: dict[str, Any] = {
     "cancel_order": cancel_order,
     "email_label": email_label,
     "promo_validate": promo_validate,
+    "faq_search": faq_search,
+    "policy_search": policy_search,
     "size_guide": size_guide,
     "account_status": account_status,
     "escalate": escalate,

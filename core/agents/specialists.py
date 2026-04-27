@@ -36,6 +36,8 @@ from core.tools.registry import (
     size_guide,
     account_status,
     escalate,
+    faq_search,
+    policy_search,
 )
 
 log = structlog.get_logger(__name__)
@@ -275,6 +277,30 @@ def get_escalation_agent():
     )
 
 
+@lru_cache(maxsize=None)
+def get_info_agent():
+    return build_agent(
+        name="Info-Agent",
+        description="Answers FAQs and policy questions using the brand knowledge base",
+        system_prompt="""You are an Information specialist for a multi-brand fashion e-commerce group.
+You answer general customer questions about FAQs, policies, delivery, returns, and account help.
+
+WORKFLOW:
+1. Use faq_search to find answers to the customer's question
+2. If they ask about a specific policy (return, delivery, payment), use policy_search
+3. Deliver the answer clearly and concisely
+4. Always cite the brand name and relevant policy details
+
+RULES:
+- Always use faq_search or policy_search tools before answering — do NOT give generic answers
+- If faq_search returns no results, use policy_search with relevant topic
+- Be specific to the brand — use brand_id from the context
+- Never say "I don't know" or give generic contact information without searching the KB first
+- End responses with a helpful next step""",
+        tools=[faq_search, policy_search, escalate],
+    )
+
+
 # ── Intent → agent mapping ────────────────────────────────────────────────────
 
 INTENT_TO_AGENT = {
@@ -290,6 +316,7 @@ INTENT_TO_AGENT = {
     "size_query": get_account_agent,
     "account_locked": get_account_agent,
     "escalate": get_escalation_agent,
+    "info": get_info_agent,
 }
 
 

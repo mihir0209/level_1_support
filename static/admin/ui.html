@@ -928,7 +928,7 @@ function app() {
     async checkHealth() {
       try {
         const h = await this.api('/health');
-        this.healthOk = h.status === 'healthy';
+        this.healthOk = h.status === 'ok' || h.status === 'healthy';
         this.services = [
           { name: 'L1 API', type: 'service', status: 'up', detail: window.location.origin },
           { name: 'FalkorDB', type: 'graph', status: h.falkordb === 'ok' ? 'up' : 'down', detail: h.falkordb || 'unavailable' },
@@ -974,6 +974,15 @@ function app() {
         try {
           await this.api('/admin/brands/' + this.selectedBrand + '/demo-data', { method: 'POST' });
         } catch (e) { /* may already be seeded */ }
+
+        // Load customers for dropdown
+        try {
+          const cd = await this.api('/api/v1/customers?brand_id=' + this.selectedBrand, {
+            headers: { 'X-API-KEY': 'l1support-demo-key-2026' }
+          });
+          this.customers = (cd.customers || []).map(c => ({ ...c, id: c.customer_id || c.id }));
+          if (!this.customers.length) { /* silent — guest session is fine */ }
+        } catch (e) { /* customers unavailable — guest session */ }
 
         const data = await this.api('/session/new', {
           method: 'POST',

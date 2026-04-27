@@ -65,7 +65,7 @@ dependencies = [
 
 [project.optional-dependencies]
 multiagent = [
-    "swarms>=10.0.0",
+    # swarms is no longer used — agents use core.agents.simple instead
 ]
 voice = [
     "pipecat-ai[daily,deepgram,elevenlabs,anthropic,silero]>=1.0.0",

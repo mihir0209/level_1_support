@@ -30,6 +30,7 @@ import structlog
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool as lc_tool
 from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt.tool_node import RunnableCallable
 
 from config import settings
 from core.context.engine import assemble_context
@@ -45,27 +46,29 @@ from core.memory.mempalace_client import mempalace
 # STATEFUL TOOL NODE — resolves tools from state at invoke time
 # ─────────────────────────────────────────────────────────────────────────
 
-class StatefulToolNode:
+class StatefulToolNode(RunnableCallable):
     """
     Tool executor that reads available tools from L1SupportState at invoke time,
     rather than being pre-bound at graph-build time. This allows the active tool
     set to differ per brand and per turn (static TOOL_REGISTRY + dynamic API tools).
+
+    Inherits from RunnableCallable so it is accepted as a proper langgraph Runnable.
     """
 
     def __init__(self, static_tools: list | None = None):
-        self.static_tools = static_tools or ALL_TOOLS
+        self._static_tools = static_tools or ALL_TOOLS
+        super().__init__(func=self._sync_invoke, afunc=self._async_invoke, name="tools")
 
     def _resolve_tools(self, state: L1SupportState) -> list:
         """Resolve the full tool list from state: static registry + dynamic tools."""
         manifest = state.context_package.tool_manifest if state.context_package else []
-        tool_map: dict[str, Any] = {t.name: t for t in self.static_tools}
+        tool_map: dict[str, Any] = {t.name: t for t in self._static_tools}
 
         # Overlay dynamic tools (brand-API tools keyed by brand_id_* prefix)
         if state.dynamic_tools:
             for t in state.dynamic_tools:
                 name = getattr(t, "name", "") or ""
                 tool_map[name] = t
-                # Also register the stripped name so manifest lookups work
                 if "_" in name:
                     stripped = name.split("_", 1)[1]
                     if stripped not in tool_map:
@@ -73,19 +76,10 @@ class StatefulToolNode:
 
         return [tool_map[n] for n in manifest if n in tool_map]
 
-    def invoke(self, state: L1SupportState) -> dict[str, Any]:
-        """
-        Execute tool calls from the last AIMessage in state.
-
-        Mimics langgraph.prebuilt.ToolNode behavior:
-        - Finds tool calls in the latest AIMessage
-        - Invokes each tool, collecting results as ToolMessages
-        - Returns updated messages list
-        """
-        # Resolve which tools are active for this brand/intent
+    def _sync_invoke(self, state: L1SupportState) -> dict[str, Any]:
+        """Execute tool calls from the last AIMessage in state (sync entry point)."""
         available = self._resolve_tools(state)
 
-        # Find last AIMessage with tool calls
         last_ai: AIMessage | None = None
         for msg in reversed(state.messages):
             if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
@@ -111,11 +105,7 @@ class StatefulToolNode:
                 continue
 
             try:
-                if asyncio.iscoroutinefunction(selected.invoke):
-                    # Run sync for now (dynamic tools are sync)
-                    result = selected.invoke(tool_args)
-                else:
-                    result = selected.invoke(tool_args)
+                result = selected.invoke(tool_args)
                 content = result if isinstance(result, str) else str(result)
             except Exception as exc:
                 content = f"Tool execution failed: {exc}"
@@ -128,11 +118,9 @@ class StatefulToolNode:
 
         return {"messages": tool_messages}
 
-    async def ainvoke(self, state: L1SupportState) -> dict[str, Any]:
-        """Async entry point — delegate to sync invoke (all tools are sync for now)."""
-        import asyncio
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: self.invoke(state))
+    async def _async_invoke(self, state: L1SupportState) -> dict[str, Any]:
+        """Async entry point — delegate to sync invoke."""
+        return self._sync_invoke(state)
 
 
 log = structlog.get_logger(__name__)
@@ -200,9 +188,7 @@ async def node_assemble_context(state: L1SupportState) -> dict[str, Any]:
     effective_conf = max(intent_conf, context_package.retrieval_confidence)
 
     # ── Load dynamic brand tools once per session ──────────────────────
-    # Loaded here (first turn) and reused via the state field across all turns.
-    # `dynamic_tools` is only appended-to by LangGraph's add_messages reducer,
-    # so it accumulates once — subsequent turns find it already populated.
+    # Loaded on first turn and stored in the state field for reuse across turns.
     dynamic_tools: list[Any] = []
     if not state.dynamic_tools:
         try:
@@ -251,6 +237,7 @@ _INTENT_TO_AGENT = {
     "size_query":        "product_agent",
     "account_locked":    "account_agent",
     "delivery_query":    "wismo_agent",
+    "info":             "info_agent",
     "unknown":           "supervisor_agent",
 }
 

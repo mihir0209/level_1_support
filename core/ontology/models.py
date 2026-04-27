@@ -32,6 +32,7 @@ class IssueCategory(StrEnum):
     ACCOUNT = "account"
     PROMOTIONS = "promotions"
     DELIVERY = "delivery"
+    INFO = "info"
 
 
 class OrderStatus(StrEnum):
