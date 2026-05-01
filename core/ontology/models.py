@@ -13,9 +13,12 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from core.taxonomy.base import SupportCategory
+
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ENUMS
+# ENUMS — e-commerce concrete values (kept for backward compat + seed data)
+# New code should use core/taxonomy/base.py enums instead.
 # ═══════════════════════════════════════════════════════════════════════════
 
 class BrandTier(StrEnum):
@@ -25,6 +28,7 @@ class BrandTier(StrEnum):
 
 
 class IssueCategory(StrEnum):
+    """Legacy e-commerce categories. Deprecated — use SupportCategory from taxonomy."""
     ORDER = "order"
     RETURN = "return"
     PAYMENT = "payment"
@@ -48,7 +52,7 @@ class OrderStatus(StrEnum):
 
 class CustomerTier(StrEnum):
     STANDARD = "standard"
-    LOYALTY = "loyalty"        # e.g. PLT Royalty, Boohoo Premier
+    LOYALTY = "loyalty"
     VIP = "vip"
 
 
@@ -66,9 +70,9 @@ class SessionOutcome(StrEnum):
 
 
 class EscalationTier(StrEnum):
-    L1 = "L1"     # other AI agents
-    L2 = "L2"     # human L1 agent
-    L3 = "L3"     # specialist / manager
+    L1 = "L1"
+    L2 = "L2"
+    L3 = "L3"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -198,11 +202,10 @@ class Customer(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════
 
 class IntentResult(BaseModel):
-    issue_type: str                      # IssueType.id
+    issue_type: str                      # IssueType.id (domain-specific slug)
     confidence: float
-    category: IssueCategory
+    category: SupportCategory            # base taxonomy category
     entities: dict[str, Any] = Field(default_factory=dict)
-    # entities: {order_id, product_sku, return_reason, promo_code, ...}
 
 
 class ContextPackage(BaseModel):

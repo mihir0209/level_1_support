@@ -19,6 +19,7 @@ class BrandEntry:
     locales: list[str]         # e.g. ["en-GB", "en-US"]
     default_region: str        # for shipping policy lookup
     chatwoot_inbox_id: int | None = None
+    domain: str = "ecommerce"  # industry domain — determines taxonomy + tool manifest
 
 
 # All 13 Boohoo Group brands registered

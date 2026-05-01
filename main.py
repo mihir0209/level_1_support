@@ -45,7 +45,7 @@ from core.ontology.models import Channel, Customer, CustomerTier, Order, OrderIt
 from core.orchestration.graph import get_graph
 from core.orchestration.state import L1SupportState
 from core.ontology.schema import create_schema, verify_connectivity
-from core.ontology.seed_data import seed_all, get_graph_client
+from core.ontology.seed_data import seed_all_with_kb as seed_all, get_graph_client
 
 log = structlog.get_logger(__name__)
 
@@ -116,6 +116,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("scheduler_start_failed", error=str(e))
 
+    # Start feedback consumer (async queue aggregator)
+    try:
+        from feedback.consumer import start_consumer
+        start_consumer()
+    except Exception as e:
+        log.warning("feedback_consumer_start_failed", error=str(e))
+
     # Register demo tools API
     from core.tools.api import router as demo_router
     app.include_router(demo_router)
@@ -130,6 +137,13 @@ async def lifespan(app: FastAPI):
     try:
         from ingestion.scheduler import stop_scheduler
         stop_scheduler()
+    except Exception:
+        pass
+
+    # Stop feedback consumer
+    try:
+        from feedback.consumer import stop_consumer
+        stop_consumer()
     except Exception:
         pass
 
@@ -212,6 +226,12 @@ async def root():
 @app.get("/admin/ui", include_in_schema=False)
 async def admin_ui():
     """L1 Support AI — main operator dashboard (support demo, sessions, monitoring, admin)."""
+    return FileResponse(_os.path.join(_static_dir, "admin", "index.html"))
+
+
+@app.get("/admin/ui/{tab}", include_in_schema=False)
+async def admin_ui_tab(tab: str):
+    """Tab-specific URLs like /admin/ui/ontology, /admin/ui/sessions, etc."""
     return FileResponse(_os.path.join(_static_dir, "admin", "index.html"))
 
 

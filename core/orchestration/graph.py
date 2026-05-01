@@ -34,7 +34,6 @@ from langgraph.prebuilt.tool_node import RunnableCallable
 
 from config import settings
 from core.context.engine import assemble_context
-from core.knowledge.retriever import update_resolution_success_rate
 from core.ontology.models import Channel, Customer, SessionOutcome
 from core.orchestration.llm import get_llm_client
 from core.orchestration.state import L1SupportState
@@ -130,7 +129,6 @@ log = structlog.get_logger(__name__)
 # ─────────────────────────────────────────────────────────────────────────
 MAX_RESOLUTION_ATTEMPTS = 10
 MAX_TURNS = 10
-LOW_CONFIDENCE_THRESHOLD = 0.45
 
 # ─────────────────────────────────────────────────────────────────────────
 # NODE: assemble_context
@@ -282,6 +280,7 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
             task=task,
             brand_id=state.brand_id,
             customer_id=state.customer_id,
+            intent_id=intent_id,
         )
         log.info(
             "specialist_agent_ran",
@@ -505,13 +504,13 @@ def check_resolution_routing(state: L1SupportState) -> Literal["tools", "escalat
         return "escalate"
     if state.turn_count >= MAX_TURNS:
         return "escalate"
-    if state.confidence < LOW_CONFIDENCE_THRESHOLD and state.turn_count > 1:
+    if state.confidence < settings.low_confidence_threshold and state.turn_count > 1:
         return "escalate"
 
     # No tool calls available AND confidence too low to self-resolve on first response:
     # escalate immediately rather than looping with unhelpful replies.
     tool_manifest = (state.context_package.tool_manifest if state.context_package else [])
-    if not tool_manifest and state.confidence < LOW_CONFIDENCE_THRESHOLD:
+    if not tool_manifest and state.confidence < settings.low_confidence_threshold:
         return "escalate"
 
     # Agent explicitly marked as resolved via [RESOLVED] signal in response
@@ -582,10 +581,34 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
 
     loop = asyncio.get_event_loop()
 
+    # Serialize LangChain messages to plain dicts before passing to feedback engine.
+    # Plain dicts serialize reliably to JSONB; BaseMessage objects may not.
+    msg_serialized = [
+        m.model_dump() if hasattr(m, "model_dump") else {"content": getattr(m, "content", str(m))}
+        for m in state.messages
+    ]
+
+    # Feedback loop via feedback engine
+    try:
+        from feedback.engine import on_session_escalate
+        on_session_escalate(
+            session_id=state.session_id,
+            brand_id=state.brand_id,
+            resolution_id=state.current_resolution_id,
+            intent=state.intent.issue_type if state.intent else "unknown",
+            reason=reason,
+            conversation={"messages": msg_serialized},
+        )
+        log.info("feedback_engine_escalate_triggered", session_id=state.session_id)
+    except Exception as e:
+        log.warning("feedback_loop_failed", error=str(e))
+
+    # Build transcript once — used by MemPalace
+    transcript = "\n".join(transcript_lines)
+
     # Tier 2: verbatim session → MemPalace
     if state.customer_id:
         try:
-            transcript = "\n".join(transcript_lines)
             await loop.run_in_executor(
                 None,
                 lambda: mempalace.remember(
@@ -663,21 +686,33 @@ async def node_close_session(state: L1SupportState) -> dict[str, Any]:
 
     loop = asyncio.get_event_loop()
 
-    # Feedback loop: update graph
-    if state.current_resolution_id:
-        try:
-            update_resolution_success_rate(
-                resolution_id=state.current_resolution_id,
-                resolved=True,
-                satisfaction=state.satisfaction or 0.75,
-            )
-        except Exception as e:
-            log.warning("feedback_loop_failed", error=str(e))
+    # Serialize LangChain messages to plain dicts before passing to feedback engine.
+    msg_serialized = [
+        m.model_dump() if hasattr(m, "model_dump") else {"content": getattr(m, "content", str(m))}
+        for m in state.messages
+    ]
+
+    # Feedback loop via feedback engine
+    try:
+        from feedback.engine import on_session_close
+        on_session_close(
+            session_id=state.session_id,
+            brand_id=state.brand_id,
+            resolution_id=state.current_resolution_id,
+            satisfaction=state.satisfaction,
+            intent=state.intent.issue_type if state.intent else "unknown",
+            confidence=state.confidence,
+            conversation={"messages": msg_serialized},
+        )
+        log.info("feedback_engine_triggered", session_id=state.session_id)
+    except Exception as e:
+        log.warning("feedback_loop_failed", error=str(e))
+
+    transcript = "\n".join(transcript_lines)
 
     # Tier 2: verbatim session → MemPalace
     if state.customer_id:
         try:
-            transcript = "\n".join(transcript_lines)
             await loop.run_in_executor(
                 None,
                 lambda: mempalace.remember(

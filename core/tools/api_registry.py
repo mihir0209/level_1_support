@@ -25,18 +25,37 @@ from sqlalchemy import text
 
 import os as _os
 
-_fernet_key = _os.environ.get("FERNET_KEY", "").encode()
-if not _fernet_key:
-    _fernet_key = Fernet.generate_key()
-_fernet = Fernet(_fernet_key)
+from config import settings
+
+
+def _get_fernet() -> "Fernet":
+    """Lazily initialize Fernet from config. Fails in production if FERNET_KEY is unset."""
+    key_raw = settings.fernet_key
+    if not key_raw:
+        raise RuntimeError(
+            "FERNET_KEY env var must be set. Generate one with:\n"
+            "  python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
+    from cryptography.fernet import Fernet
+    return Fernet(key_raw.encode())
+
+
+_fernet_instance: "Fernet | None" = None
+
+
+def _get_fernet_instance() -> "Fernet":
+    global _fernet_instance
+    if _fernet_instance is None:
+        _fernet_instance = _get_fernet()
+    return _fernet_instance
 
 
 def _enc(value: str) -> bytes:
-    return _fernet.encrypt(value.encode())
+    return _get_fernet_instance().encrypt(value.encode())
 
 
 def _dec(data: bytes) -> str:
-    return _fernet.decrypt(data).decode()
+    return _get_fernet_instance().decrypt(data).decode()
 
 
 # ── Config models ───────────────────────────────────────────────────────────────
@@ -183,16 +202,9 @@ def describe_from_curl(curl_cmd: str) -> str:
 # ── Postgres helpers ──────────────────────────────────────────────────────────────
 
 def _get_pool():
-    """Lazily create DB pool from env."""
+    """Lazily create DB pool from settings."""
     import psycopg
-    return psycopg.connect(
-        host=_os.environ.get("POSTGRES_HOST", "localhost"),
-        port=int(_os.environ.get("POSTGRES_PORT", "5432")),
-        dbname=_os.environ.get("POSTGRES_DB", "l1_support"),
-        user=_os.environ.get("POSTGRES_USER", "l1support"),
-        password=_os.environ.get("POSTGRES_PASSWORD", "l1support_secret"),
-        autocommit=True,
-    )
+    return psycopg.connect(**settings.postgres_conn_params())
 
 
 def _fernet_for(key_bytes: bytes) -> Fernet:
@@ -253,7 +265,7 @@ def register_endpoint(
     For curl commands, the method, URL, body are auto-extracted.
     """
     if curl_command:
-        parsed = parse_curl(curl_cmd)
+        parsed = parse_curl(curl_command)
         method = parsed.method
         # Strip base URL to get path
         from urllib.parse import urlparse as up
@@ -262,7 +274,7 @@ def register_endpoint(
         if p.query:
             path += f"?{p.query}"
         if not description:
-            description = describe_from_curl(curl_cmd)
+            description = describe_from_curl(curl_command)
         if parsed.body and not body_schema:
             body_schema = {"type": "object", "example": parsed.body}
 

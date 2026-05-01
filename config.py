@@ -5,6 +5,7 @@ All modules import from here; no os.getenv() calls scattered in business logic.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -51,6 +52,17 @@ class Settings(BaseSettings):
     postgres_user: str = Field(default="l1support")
     postgres_password: str = Field(default="l1support_secret")
 
+    # ── Fernet encryption (for brand API credentials) ────────────────────
+    # Must be set in production. If unset, raises error at startup.
+    fernet_key: str = Field(default="")
+
+    # ── Secrets that must be set in production ───────────────────────────
+    admin_api_key: str = Field(default="")
+
+    # ── Confidence thresholds (single source of truth) ──────────────────
+    low_confidence_threshold: float = Field(default=0.45)
+    csat_dissatisfied_threshold: float = Field(default=0.4)
+
     @property
     def postgres_dsn(self) -> str:
         return (
@@ -60,14 +72,40 @@ class Settings(BaseSettings):
 
     @property
     def postgres_dsn_sync(self) -> str:
-        # In Docker, postgres is at the docker-compose service name (postgres:5432).
-        # On the host, it's at localhost:5432. Use POSTGRES_HOST when set,
-        # falling back to localhost for local development.
-        host = self.postgres_host if self.postgres_host != "localhost" else "localhost"
+        # Compose env: POSTGRES_HOST=postgres (service name) → host=postgres
+        # Dev local: POSTGRES_HOST=localhost (default) → host=localhost
+        # Explicit override: POSTGRES_HOST=db.myapp.com → host=db.myapp.com
+        host = os.environ.get("POSTGRES_HOST", self.postgres_host)
         return (
             f"postgresql+psycopg://{self.postgres_user}:{self.postgres_password}"
             f"@{host}:{self.postgres_port}/{self.postgres_db}"
         )
+
+    def postgres_conn_params(self) -> dict:
+        """Return psycopg connection kwargs — for raw psycopg connections."""
+        return {
+            "host": os.environ.get("POSTGRES_HOST", self.postgres_host),
+            "port": int(os.environ.get("POSTGRES_PORT", str(self.postgres_port))),
+            "dbname": self.postgres_db,
+            "user": os.environ.get("POSTGRES_USER", self.postgres_user),
+            "password": os.environ.get("POSTGRES_PASSWORD") or self.postgres_password,
+            "autocommit": True,
+        }
+
+    def postgres_readonly_conn_params(self) -> dict:
+        """Return psycopg connection kwargs for the read-only Text2Cypher user.
+
+        Uses POSTGRES_READONLY_USER / POSTGRES_READONLY_PASSWORD env vars when set,
+        falling back to the l1_readonly role credentials from the migration.
+        """
+        return {
+            "host": os.environ.get("POSTGRES_HOST", self.postgres_host),
+            "port": int(os.environ.get("POSTGRES_PORT", str(self.postgres_port))),
+            "dbname": self.postgres_db,
+            "user": os.environ.get("POSTGRES_READONLY_USER", "l1_readonly"),
+            "password": os.environ.get("POSTGRES_READONLY_PASSWORD") or "l1_readonly_secret",
+            "autocommit": True,
+        }
 
     # ── Redis (session cache) ───────────────────────────────────────────
     redis_url: str = Field(default="redis://localhost:6380/0")
@@ -106,11 +144,20 @@ class Settings(BaseSettings):
     app_port: int = Field(default=8000)
     log_level: str = Field(default="INFO")
     environment: str = Field(default="development")
-    admin_api_key: str = Field(default="l1support-demo-key-2026")
 
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @model_validator(mode="after")
+    def _enforce_production_secrets(self) -> Settings:
+        """Fail fast if required secrets are missing in production."""
+        if self.is_production:
+            if not self.admin_api_key:
+                raise ValueError("admin_api_key must be set in production (set ADMIN_API_KEY env var)")
+            if not self.fernet_key:
+                raise ValueError("fernet_key must be set in production (set FERNET_KEY env var)")
+        return self
 
     @model_validator(mode="after")
     def _strip_trailing_slashes(self) -> Settings:

@@ -91,7 +91,7 @@ def get_resolutions_for_issue(
         steps = row[2]
         if isinstance(steps, str):
             try:
-                steps = json.loads(steps.replace("'", '"'))
+                steps = json.loads(steps)
             except Exception:
                 steps = []
         resolutions.append({
@@ -366,8 +366,10 @@ Always include brand_id filter. Return ONLY the Cypher query, no explanation."""
 
     cypher = await llm_client.generate(prompt)
 
-    # Safety guard: reject write operations
-    forbidden = ["CREATE", "SET", "DELETE", "MERGE", "REMOVE", "DROP"]
+    # Safety guard: reject write operations (second-layer defense).
+    # Primary protection is the l1_readonly Postgres role — this catches
+    # attempts that might slip past connection-level enforcement.
+    forbidden = {"CREATE", "SET", "DELETE", "DETACH", "REMOVE", "DROP", "MERGE", "FOREACH"}
     if any(kw in cypher.upper() for kw in forbidden):
         log.warning("text2cypher_blocked_write_attempt", cypher=cypher, brand_id=brand_id)
         return []

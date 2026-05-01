@@ -19,13 +19,16 @@ from __future__ import annotations
 import hashlib
 import os
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any
 
 import structlog
 
-from config import settings
-
 log = structlog.get_logger(__name__)
+
+# Use absolute path rooted at project root — works in both Docker and local dev.
+# Docker mounts ./data/mempalace → /app/data/mempalace, matching this path.
+_DATA_DIR = str(Path(__file__).parent.parent.parent / "data" / "mempalace")
 
 _RETENTION_DAYS = 30
 
@@ -49,10 +52,9 @@ def _get_chroma():
     global _chroma_client
     if _chroma_client is None:
         import chromadb
-        data_dir = os.path.abspath(settings.mempalace_data_dir)
-        os.makedirs(data_dir, exist_ok=True)
-        _chroma_client = chromadb.PersistentClient(path=data_dir)
-        log.info("mempalace_chroma_ready", path=data_dir)
+        os.makedirs(_DATA_DIR, exist_ok=True)
+        _chroma_client = chromadb.PersistentClient(path=_DATA_DIR)
+        log.info("mempalace_chroma_ready", path=_DATA_DIR)
     return _chroma_client
 
 
@@ -80,7 +82,7 @@ class MemPalaceClient:
     def remember(
         self,
         brand_id: str,
-        customer_id: str,
+        customer_id: str | None,
         session_id: str,
         content: str,
         metadata: dict[str, Any] | None = None,
@@ -92,7 +94,7 @@ class MemPalaceClient:
         col = _get_collection(brand_id)
         doc_id = _doc_id(session_id)
         meta: dict[str, Any] = {
-            "customer_id": customer_id,
+            "customer_id": customer_id or "anonymous",
             "session_id": session_id,
             "brand_id": brand_id,
             "stored_at": datetime.now(timezone.utc).isoformat(),
@@ -114,7 +116,7 @@ class MemPalaceClient:
     def recall(
         self,
         brand_id: str,
-        customer_id: str,
+        customer_id: str | None,
         query: str,
         k: int = 3,
     ) -> list[str]:
@@ -126,10 +128,11 @@ class MemPalaceClient:
         """
         col = _get_collection(brand_id)
         try:
+            query_customer_id = customer_id or "anonymous"
             results = col.query(
                 query_texts=[query],
                 n_results=min(k, 10),
-                where={"customer_id": customer_id},
+                where={"customer_id": query_customer_id},
                 include=["documents", "metadatas", "distances"],
             )
             docs = results.get("documents", [[]])[0]
@@ -182,9 +185,11 @@ class MemPalaceClient:
             log.error("mempalace_purge_failed", error=str(exc), brand_id=brand_id)
             return 0
 
-    def get_session_count(self, brand_id: str, customer_id: str) -> int:
+    def get_session_count(self, brand_id: str, customer_id: str | None) -> int:
         """Return number of stored sessions for a customer."""
         col = _get_collection(brand_id)
+        if not customer_id:
+            return 0
         try:
             results = col.get(
                 where={"customer_id": customer_id},

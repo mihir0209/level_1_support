@@ -164,18 +164,80 @@ def build_agent(
     )
 
 
+# Fallback specialist map — used when domain config has no mapping for an intent.
+# Primary lookup is via domain config; this is the safety net.
+_FALLBACK_SPECIALIST_MAP: dict[str, str] = {
+    "wismo": "wismo_agent",
+    "return_initiate": "returns_agent",
+    "refund_delay": "refund_agent",
+    "wrong_item": "wrong_item_agent",
+    "damaged_item": "wrong_item_agent",
+    "order_cancel": "returns_agent",
+    "payment_failed": "payment_agent",
+    "klarna_return": "refund_agent",
+    "afterpay_return": "refund_agent",
+    "promo_not_applied": "promos_agent",
+    "size_query": "account_agent",
+    "account_locked": "account_agent",
+    "delivery_query": "wismo_agent",
+    "info": "info_agent",
+    "network_outage": "wismo_agent",
+    "billing_dispute": "refund_agent",
+    "device_issue": "wrong_item_agent",
+}
+
+
 async def run_specialist(
     agent: Any,
     task: str,
     brand_id: str,
     customer_id: str | None = None,
+    intent_id: str | None = None,
 ) -> str:
     """
     Run a specialist agent on a task string.
 
     Dynamic tools are loaded from the registered API registry and injected into
     the agent at runtime, giving it real customer/order/return data for this brand.
+
+    The system prompt is generated dynamically from KG data + domain config,
+    replacing any empty prompt passed at agent construction time.
     """
+    from brands.registry import get_brand_by_id
+    from core.context.prompts import generate_specialist_prompt
+    from domains.loader import get_domain_config
+
+    # Resolve domain from brand entry, then load domain config
+    brand_entry = get_brand_by_id(brand_id)
+    domain = brand_entry.domain if brand_entry else "ecommerce"
+    domain_cfg = get_domain_config(domain)
+
+    # Resolve intent_id → agent_id using domain config (falls back to hardcoded map)
+    agent_id = domain_cfg.get_specialist_for(intent_id or "") or _FALLBACK_SPECIALIST_MAP.get(intent_id or "", "info_agent")
+
+    # Build domain-aware context tokens from config
+    excluded_cats = domain_cfg.excluded_item_categories or []
+    tier_display = brand_entry.name if brand_entry else brand_id
+
+    domain_hints = [
+        f"Brand: {tier_display} ({brand_id})",
+        f"Domain: {domain}",
+    ]
+    if excluded_cats:
+        domain_hints.append(f"Non-returnable categories: {', '.join(excluded_cats)}")
+
+    # Generate dynamic system prompt from KG data + domain config
+    dynamic_prompt = generate_specialist_prompt(agent_id, brand_id, domain=domain)
+
+    # Inject domain-specific rules into the system prompt
+    domain_suffix = "\n".join(domain_hints)
+    if dynamic_prompt:
+        # Append domain context after the prompt's existing rules
+        dynamic_prompt = dynamic_prompt.rstrip() + "\n\n" + domain_suffix
+
+    # Inject into agent (SimpleAgent.system_prompt is writable at runtime)
+    agent.system_prompt = dynamic_prompt
+
     # Inject dynamic brand-specific tools
     try:
         from core.tools.dynamic_builder import load_tools_for_brand

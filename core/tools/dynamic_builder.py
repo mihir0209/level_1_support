@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Callable
+from typing import Callable
 
 import psycopg
 import requests
@@ -27,7 +27,7 @@ from core.tools.api_registry import (
     _dec as _fernet_dec,
 )
 from core.utils.http import http_request
-from core.tracing import traced, set_span_attributes
+from core.tracing import set_span_attributes, get_tracer
 from core.logging_config import get_logger
 
 log = get_logger(__name__)
@@ -36,6 +36,10 @@ log = get_logger(__name__)
 # ── Tool registry ────────────────────────────────────────────────────────────
 
 _TOOL_REGISTRY: dict[str, Callable] = {}
+# Credential cache: tool_name → (credential_dict, timestamp_ms)
+# Refreshes every 5 minutes to pick up rotations
+_CRED_CACHE: dict[str, tuple[dict, float]] = {}
+_CRED_CACHE_TTL_MS = 5 * 60 * 1000
 
 
 def _build_tool_func(spec: APIToolSpec) -> Callable:
@@ -79,11 +83,11 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
                         JOIN registered_api_endpoints e ON e.brand_api_config_id = c.id
                         WHERE e.name = %(name)s AND e.is_active = true AND c.is_active = true
                         LIMIT 1
-                    """, {"name": tool_name})
+                    """, {"name": spec.name})
 
                     row = cur.fetchone()
                     if not row:
-                        return f"Error: brand API config not found for {tool_name}"
+                        return f"Error: brand API config not found for {spec.name}"
                     base_url, default_headers_raw, brand_id_for_url = row
                     headers = json.loads(default_headers_raw) if default_headers_raw else {}
         finally:
@@ -95,7 +99,7 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
         all_params.update(kw)
 
         if spec.requires_auth:
-            cred = _get_credential_for_spec(tool_name)
+            cred = _get_credential_for_spec(spec.name)
             if cred:
                 if cred["type"] == "bearer":
                     headers["Authorization"] = f"Bearer {cred['value']}"
@@ -171,18 +175,23 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
 
 
 def _get_pool():
-    return psycopg.connect(
-        host=os.environ.get("POSTGRES_HOST", "localhost"),
-        port=int(os.environ.get("POSTGRES_PORT", "5432")),
-        dbname=os.environ.get("POSTGRES_DB", "l1_support"),
-        user=os.environ.get("POSTGRES_USER", "l1support"),
-        password=os.environ.get("POSTGRES_PASSWORD", "l1support_secret"),
-        autocommit=True,
-    )
+    from config import settings
+    return psycopg.connect(**settings.postgres_conn_params())
 
 
 def _get_credential_for_spec(tool_name: str) -> dict | None:
-    """Decrypt and return credential for a tool's brand config."""
+    """
+    Decrypt and return credential for a tool's brand config.
+    Cached with a 5-minute TTL to avoid per-call DB connections.
+    """
+    import time
+    now_ms = time.time() * 1000
+
+    if tool_name in _CRED_CACHE:
+        cached_cred, cached_at = _CRED_CACHE[tool_name]
+        if now_ms - cached_at < _CRED_CACHE_TTL_MS:
+            return cached_cred
+
     conn = _get_pool()
     try:
         with conn:
@@ -202,7 +211,9 @@ def _get_credential_for_spec(tool_name: str) -> dict | None:
                     return None
                 key_type, key_name, enc_raw, _ = row
                 value = _fernet_dec(bytes(enc_raw))
-                return {"type": key_type, "name": key_name, "value": value}
+                cred = {"type": key_type, "name": key_name, "value": value}
+                _CRED_CACHE[tool_name] = (cred, now_ms)
+                return cred
     finally:
         conn.close()
 
@@ -218,6 +229,8 @@ def load_tools_for_brand(brand_id: str, brand_fernet_key: bytes | None = None) -
 
     Tools are cached in _TOOL_REGISTRY keyed by tool name.
     """
+    from core.tools.api_registry import build_tool_manifest_for_brand, _dec as _fernet_dec
+
     manifest = build_tool_manifest_for_brand(brand_id)
     tools = []
     for spec in manifest:
