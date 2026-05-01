@@ -205,7 +205,35 @@ class IntentResult(BaseModel):
     issue_type: str                      # IssueType.id (domain-specific slug)
     confidence: float
     category: SupportCategory            # base taxonomy category
-    entities: dict[str, Any] = Field(default_factory=dict)
+    entities: "ExtractedEntities" = Field(default_factory=dict)
+
+
+class ExtractedEntities(BaseModel):
+    """
+    Typed entity bag extracted from the customer's message.
+    Tools receive this via .model_dump(exclude_none=True) so missing fields
+    are simply absent — no KeyError on tool invocation.
+    """
+    order_id: str | None = None
+    product_sku: str | None = None
+    return_reason: str | None = None
+    promo_code: str | None = None
+    customer_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    tracking_id: str | None = None
+    amount_gbp: float | None = None
+    size: str | None = None
+    color: str | None = None
+    # Catch-all for domain-specific entities not listed above
+    extra: dict[str, Any] = Field(default_factory=dict)
+
+    def model_dump(self, **kwargs) -> dict[str, Any]:
+        """Flatten extra fields into the top-level dict."""
+        base = super().model_dump(**kwargs)
+        if self.extra:
+            base.update(self.extra)
+        return base
 
 
 class ContextPackage(BaseModel):
@@ -222,7 +250,7 @@ class ContextPackage(BaseModel):
     resolution_block: str              # resolution steps from graph
     session_block: str                 # compressed conversation history
     tool_manifest: list[str]           # tool function names available
-    entities: dict[str, Any]
+    entities: ExtractedEntities = Field(default_factory=ExtractedEntities)
 
     # Metadata
     intent: IntentResult | None = None

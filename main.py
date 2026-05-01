@@ -102,6 +102,8 @@ async def lifespan(app: FastAPI):
         try:
             _, graph = get_graph_client()
             create_schema(graph)
+            from core.ontology.schema import ensure_graphiti_graph
+            ensure_graphiti_graph()
             seed_all(graph)
             log.info("knowledge_graph_ready")
         except Exception as e:

@@ -23,94 +23,22 @@ from typing import Any
 
 import structlog
 
-from config import settings
 from core.knowledge.retriever import get_brand_info, retrieve_knowledge
 from core.ontology.models import (
     Channel,
     ContextPackage,
     Customer,
-    IssueCategory,
+    ExtractedEntities,
     IntentResult,
 )
+from core.context.prompts import (
+    generate_brand_system_prompt,
+    generate_intent_classification_prompt,
+)
+from domains.loader import get_domain_config
+from brands.registry import get_brand_by_id
 
 log = structlog.get_logger(__name__)
-
-# Approximate token counts for each context block (for budget management)
-_TOKEN_BUDGET = 8000       # total context tokens available
-_RESPONSE_RESERVE = 4000   # reserved for model's response
-
-# ── Tool manifest per intent type (Step 7 lookup table) ───────────────────
-_TOOL_MANIFEST: dict[str, list[str]] = {
-    "wismo":             ["order_lookup", "shipment_track"],
-    "return_initiate":   ["policy_lookup", "return_init", "email_label"],
-    "refund_delay":      ["refund_status", "payment_lookup", "escalate"],
-    "wrong_item":        ["order_lookup", "catalog_lookup", "return_init", "refund_initiate"],
-    "damaged_item":      ["order_lookup", "return_init", "refund_initiate"],
-    "order_cancel":      ["order_lookup", "cancel_order"],
-    "payment_failed":    ["payment_lookup"],
-    "promo_not_applied": ["promo_validate", "escalate"],
-    "klarna_return":     ["policy_lookup", "return_init"],
-    "afterpay_return":   ["policy_lookup", "return_init"],
-    "size_query":        ["size_guide", "catalog_lookup"],
-    "account_locked":    ["account_status", "escalate"],
-    "delivery_query":    ["policy_lookup", "shipment_track"],
-    "info":             ["faq_search", "policy_search"],
-    "unknown":           ["escalate"],
-}
-
-# ── Brand system prompt templates ─────────────────────────────────────────
-_BRAND_SYSTEM_PROMPTS: dict[str, str] = {
-    "boohoo_uk": (
-        "You are Boohoo's AI support assistant. Boohoo is a British fast-fashion brand for women "
-        "aged 16-30. Be friendly, helpful, and casual. Keep responses concise and action-oriented."
-    ),
-    "boohooman_uk": (
-        "You are BoohooMAN's AI support assistant. BoohooMAN is a men's fashion brand for 16-30s. "
-        "Be direct, helpful, and relaxed in tone."
-    ),
-    "plt_uk": (
-        "You are PLT's AI support assistant representing PrettyLittleThing. PLT is a bold, "
-        "fashion-forward brand for women aged 16-24. Be upbeat, warm, and use casual language. "
-        "Emoji use is fine occasionally."
-    ),
-    "nastygal_us": (
-        "You are Nasty Gal's AI support assistant. Nasty Gal is a confident, edgy US fashion brand "
-        "for women 18-35. Keep it real, direct, and empowering."
-    ),
-    "karenmillen_uk": (
-        "You are Karen Millen's customer experience assistant. Karen Millen is a premium British "
-        "fashion brand for women 30-50. Maintain a warm, sophisticated, and professional tone. "
-        "This is a premium brand — prioritise quality service over speed."
-    ),
-    "debenhams_uk": (
-        "You are Debenhams' customer support assistant. Debenhams is a trusted British department "
-        "store brand. Be warm, reliable, and thorough."
-    ),
-}
-
-_DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful customer support assistant for a fashion brand. "
-    "Be friendly, professional, and focused on resolving the customer's issue quickly."
-)
-
-# ── Channel-specific formatting additions ─────────────────────────────────
-_CHANNEL_ADDITIONS: dict[Channel, str] = {
-    Channel.VOICE: (
-        "\n\nVOICE FORMAT RULES: Maximum 2 sentences per response. Never use bullet points or "
-        "markdown. Spell out numbers: 'twenty-eight days' not '28 days'. "
-        "Use natural speech patterns. Confirm understanding before moving on."
-    ),
-    Channel.EMAIL: (
-        "\n\nEMAIL FORMAT RULES: Use proper paragraphs. Include a greeting and sign-off. "
-        "You may use formatting like bullet points for steps. Be thorough — email customers "
-        "expect a complete answer in one message."
-    ),
-    Channel.CHAT: "",
-    Channel.WHATSAPP: (
-        "\n\nWHATSAPP FORMAT RULES: Keep messages short (under 200 characters per message). "
-        "Use simple language. Avoid long paragraphs."
-    ),
-}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -122,12 +50,20 @@ async def classify_intent(
     brand_id: str,
     conversation_history: list[dict[str, str]],
     llm_client,
+    domain: str = "ecommerce",
 ) -> IntentResult:
     """
     Fast intent classification using the cheap/fast model.
-    Returns an IntentResult with issue_type slug and extracted entities.
+    Domain-aware: uses the domain config to list only valid IssueTypes.
     """
-    known_issue_types = [k for k in _TOOL_MANIFEST if k != "unknown"]
+    from brands.registry import get_brand_by_id
+    from core.taxonomy import SupportCategory
+
+    # Resolve domain from brand entry (default to ecommerce for backward compat)
+    if domain == "ecommerce":
+        brand_entry = get_brand_by_id(brand_id)
+        if brand_entry:
+            domain = brand_entry.domain
 
     # Include last 2 turns of history for context (avoid full history = slow)
     recent_history = conversation_history[-4:] if len(conversation_history) > 4 else conversation_history
@@ -135,39 +71,15 @@ async def classify_intent(
         f"{m['role'].upper()}: {m['content']}" for m in recent_history
     ) if recent_history else "No prior conversation."
 
-    prompt = f"""Classify the customer's support intent for a fashion e-commerce brand.
+    prompt = generate_intent_classification_prompt(
+        brand_id=brand_id,
+        domain=domain,
+        conversation_history=history_text,
+    )
 
-Known issue types (use these exact IDs):
-{json.dumps(known_issue_types, indent=2)}
-
-Use "info" when the customer asks general questions like:
-  - "where can I find FAQs?" / "how do I track my order?" / "what is your return policy?"
-  - "what payment methods do you accept?" / "do you deliver to [country]?"
-  - "how do I apply a promo code?" / "what sizes do you have?"
-  - Any general question about brand policies, delivery, returns, sizing, or account help
-
-Use "unknown" ONLY if the message is incoherent, hostile, or completely off-topic.
-
-Recent conversation:
-{history_text}
-
-Latest customer message: "{message}"
-Brand: {brand_id}
-
-Respond with ONLY valid JSON (no markdown):
-{{
-  "issue_type": "<one of the known issue types, or 'unknown'>",
-  "confidence": <float 0.0-1.0>,
-  "category": "<order|return|payment|product|account|promotions|delivery|info>",
-  "entities": {{
-    "order_id": "<if mentioned, else null>",
-    "product_sku": "<if mentioned, else null>",
-    "return_reason": "<if mentioned, else null>",
-    "promo_code": "<if mentioned, else null>",
-    "payment_method": "<klarna|afterpay|paypal|card|null>",
-    "item_description": "<brief description of item if mentioned, else null>"
-  }}
-}}"""
+    # Append the customer message to the prompt (generate_intent_classification_prompt
+    # doesn't include it — we append it here so the LLM has the actual query)
+    prompt = prompt.rstrip() + f'\n\nLatest customer message: "{message}"'
 
     response = await llm_client.generate(
         prompt,
@@ -177,24 +89,26 @@ Respond with ONLY valid JSON (no markdown):
 
     try:
         data = json.loads(response.strip())
-        raw_category = data.get("category", "order")
+        raw_category = data.get("category", "information")
         try:
-            category = IssueCategory(raw_category)
+            category = SupportCategory(raw_category)
         except ValueError:
-            category = IssueCategory.ORDER
+            category = SupportCategory.INFORMATION
         return IntentResult(
             issue_type=data.get("issue_type", "unknown"),
             confidence=float(data.get("confidence", 0.5)),
             category=category,
-            entities={k: v for k, v in data.get("entities", {}).items() if v is not None},
+            entities=ExtractedEntities(
+                **{k: v for k, v in data.get("entities", {}).items() if v is not None},
+            ),
         )
     except (json.JSONDecodeError, ValueError) as e:
         log.warning("intent_parse_failed", error=str(e), response=response[:200])
         return IntentResult(
             issue_type="unknown",
             confidence=0.3,
-            category=IssueCategory.ORDER,
-            entities={},
+            category=SupportCategory.INFORMATION,
+            entities=ExtractedEntities(),
         )
 
 
@@ -420,8 +334,12 @@ async def assemble_context(
     """
     t_start = time.monotonic()
 
+    # Resolve domain for this brand (used throughout the pipeline)
+    brand_entry = get_brand_by_id(brand_id)
+    domain = brand_entry.domain if brand_entry else "ecommerce"
+
     # ── Step 1: Intent Classification ────────────────────────────────────
-    intent = await classify_intent(message, brand_id, conversation_history, llm_client)
+    intent = await classify_intent(message, brand_id, conversation_history, llm_client, domain=domain)
     log.info("intent_classified", issue_type=intent.issue_type, confidence=intent.confidence)
 
     # ── Steps 3+4+5: Parallel fetch ──────────────────────────────────────
@@ -463,22 +381,22 @@ async def assemble_context(
     session_block = compress_session(conversation_history)
 
     # ── Step 7: Tool Manifest ─────────────────────────────────────────────
-    tool_manifest = _TOOL_MANIFEST.get(intent.issue_type, ["escalate"])
+    # Domain was resolved at the top of the function
+    domain_cfg = get_domain_config(domain)
+    tool_manifest = domain_cfg.get_tools_for(intent.issue_type)
+    if not tool_manifest:
+        tool_manifest = ["escalate"]
 
     # ── Step 8: Context Packing ───────────────────────────────────────────
     brand_name = brand_info["name"] if brand_info else brand_id
 
-    # Build system prompt: base + brand identity + channel adaptation
-    base_prompt = _BRAND_SYSTEM_PROMPTS.get(brand_id, _DEFAULT_SYSTEM_PROMPT)
-    channel_addition = _CHANNEL_ADDITIONS.get(channel, "")
-
-    # Tone adaptation based on customer signals
-    tone_note = ""
-    if customer and customer.total_orders > 0:
-        # Repeat customer or frustrated?
-        pass  # Graphiti long-term history would inject this — placeholder for Phase 2
-
-    system_prompt = base_prompt + channel_addition + tone_note
+    # Build system prompt: dynamically generated from KG data + domain config
+    system_prompt = generate_brand_system_prompt(
+        brand_id=brand_id,
+        brand_name=brand_name,
+        domain=domain,
+        channel=channel.value if hasattr(channel, "value") else str(channel),
+    )
 
     # Build context blocks
     user_context_block = _format_user_context_block(customer, history_facts)

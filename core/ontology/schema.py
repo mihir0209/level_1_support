@@ -74,3 +74,32 @@ def verify_connectivity() -> bool:
     except Exception as e:
         log.error("falkordb_connection_failed", error=str(e))
         return False
+
+
+def ensure_graphiti_graph() -> bool:
+    """
+    Ensure the Graphiti graph exists in FalkorDB.
+    Graphiti uses a separate graph name (l1_user_memory) from the main KG (l1_support).
+    If it doesn't exist, create it. Idempotent — safe to call on every startup.
+    """
+    try:
+        from config import settings
+        db = FalkorDB(host=settings.falkordb_host, port=settings.falkordb_port)
+        graph_name = settings.graphiti_graph_name
+
+        # Check if graph exists by trying to select it
+        try:
+            existing = db.select_graph(graph_name)
+            existing.query("RETURN 1")
+            log.info("graphiti_graph_exists", graph=graph_name)
+            return True
+        except Exception:
+            # Graph doesn't exist — create it
+            pass
+
+        db.select_graph(graph_name)  # creates implicitly
+        log.info("graphiti_graph_created", graph=graph_name)
+        return True
+    except Exception as e:
+        log.error("graphiti_graph_init_failed", error=str(e))
+        return False

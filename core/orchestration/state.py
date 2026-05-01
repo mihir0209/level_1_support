@@ -11,7 +11,7 @@ from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict, Field
 
-from core.ontology.models import Channel, ContextPackage, Customer, IntentResult, SessionOutcome
+from core.ontology.models import Channel, ContextPackage, Customer, ExtractedEntities, IntentResult, SessionOutcome
 
 
 class L1SupportState(BaseModel):
@@ -35,7 +35,7 @@ class L1SupportState(BaseModel):
 
     # ── Intent & Entities (updated each turn) ─────────────────────────
     intent: IntentResult | None = None
-    entities: dict[str, Any] = Field(default_factory=dict)
+    entities: ExtractedEntities = Field(default_factory=ExtractedEntities)
     confidence: float = 0.0
 
     # ── Context (assembled each turn by Context Engine) ────────────────

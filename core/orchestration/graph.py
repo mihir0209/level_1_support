@@ -263,8 +263,8 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
             last_msg = msg.content
             break
 
-    entities = state.entities or {}
-    entity_str = ", ".join(f"{k}={v}" for k, v in entities.items()) if entities else "none"
+    entities_dict = state.entities.model_dump() if state.entities else {}
+    entity_str = ", ".join(f"{k}={v}" for k, v in entities_dict.items() if v is not None) if entities_dict else "none"
     task = (
         f"Customer message: \"{last_msg}\"\n"
         f"Brand: {state.brand_id}\n"
@@ -528,7 +528,7 @@ def _build_episode_text(state: L1SupportState, outcome: str, extra: str = "") ->
     """Compose a human-readable episode summary for Graphiti ingestion."""
     intent_str = state.intent.issue_type if state.intent else "unknown"
     category = state.intent.category.value if state.intent else "unknown"
-    entities = state.entities or {}
+    entities = state.entities.model_dump() if state.entities else {}
 
     parts = [
         f"Customer contacted support via {state.channel.value} about {intent_str} ({category}).",
@@ -539,8 +539,8 @@ def _build_episode_text(state: L1SupportState, outcome: str, extra: str = "") ->
         parts.append(f"Order referenced: {entities['order_id']}.")
     if entities.get("return_reason"):
         parts.append(f"Return reason: {entities['return_reason']}.")
-    if entities.get("item_description"):
-        parts.append(f"Item: {entities['item_description']}.")
+    if entities.get("product_sku"):
+        parts.append(f"Item SKU: {entities['product_sku']}.")
     if state.current_resolution_id and outcome == "resolved":
         parts.append(f"Resolution applied: {state.current_resolution_id}.")
     if extra:
@@ -627,6 +627,49 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
         except Exception as e:
             log.warning("mempalace_write_failed", session_id=state.session_id, error=str(e))
 
+    # Chatwoot: create a real ticket (non-fatal if unavailable)
+    chatwoot_conv_id: str | None = None
+    try:
+        from brands.registry import get_brand_by_id
+        from core.integrations.chatwoot import create_conversation, add_message
+        brand_entry = get_brand_by_id(state.brand_id)
+        inbox_id = brand_entry.chatwoot_inbox_id if brand_entry else None
+        if inbox_id:
+            # Build a summary message for the agent
+            summary_lines = [
+                f"Session ID: {state.session_id}",
+                f"Intent: {state.intent.issue_type if state.intent else 'unknown'}",
+                f"Confidence: {state.confidence:.0%}",
+                f"Turns: {state.turn_count}",
+                f"Reason: {reason}",
+                "",
+                "Transcript:",
+                transcript,
+            ]
+            initial_msg = "\n".join(summary_lines)
+            chatwoot_conv_id = create_conversation(
+                brand_id=state.brand_id,
+                inbox_id=inbox_id,
+                customer_name=None,
+                customer_email=None,
+                initial_message=initial_msg,
+                session_id=state.session_id,
+                metadata={
+                    "intent": state.intent.issue_type if state.intent else "unknown",
+                    "confidence": state.confidence,
+                    "turn_count": state.turn_count,
+                },
+            )
+            if chatwoot_conv_id:
+                log.info(
+                    "chatwoot_ticket_created",
+                    session_id=state.session_id,
+                    conversation_id=chatwoot_conv_id,
+                    inbox_id=inbox_id,
+                )
+    except Exception as e:
+        log.warning("chatwoot_ticket_failed", session_id=state.session_id, error=str(e))
+
     # Tier 3: write escalation episode → Graphiti
     if state.customer_id:
         try:
@@ -652,6 +695,7 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
         "is_resolved": False,
         "outcome": SessionOutcome.ESCALATED,
         "escalation_reason": reason,
+        "chatwoot_conversation_id": chatwoot_conv_id,
     }
 
 
