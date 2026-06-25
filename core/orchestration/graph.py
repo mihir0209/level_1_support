@@ -220,26 +220,6 @@ async def node_assemble_context(state: L1SupportState) -> dict[str, Any]:
 # NODE: route_to_agent
 # ─────────────────────────────────────────────────────────────────────────
 
-# Intent → specialist agent name mapping
-_INTENT_TO_AGENT = {
-    "wismo":             "wismo_agent",
-    "return_initiate":   "returns_agent",
-    "refund_delay":      "refund_agent",
-    "wrong_item":        "returns_agent",
-    "damaged_item":      "returns_agent",
-    "order_cancel":      "wismo_agent",
-    "payment_failed":    "payment_agent",
-    "promo_not_applied": "promos_agent",
-    "klarna_return":     "returns_agent",
-    "afterpay_return":   "returns_agent",
-    "size_query":        "product_agent",
-    "account_locked":    "account_agent",
-    "delivery_query":    "wismo_agent",
-    "info":             "info_agent",
-    "unknown":           "supervisor_agent",
-}
-
-
 async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
     """
     Route to the appropriate specialist agent and execute it.
@@ -251,7 +231,6 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
     from core.agents.base import run_specialist
 
     intent_id = state.intent.issue_type if state.intent else "unknown"
-    agent_name = _INTENT_TO_AGENT.get(intent_id, "supervisor_agent")
 
     # Build task description from context
     last_msg = ""
@@ -273,8 +252,11 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
         f"Resolution steps available: {state.context_package.resolution_block if state.context_package else 'none'}"
     )
 
+    agent_name = "supervisor_agent"
     try:
         specialist = get_agent_for_intent(intent_id, state.brand_id)
+        if hasattr(specialist, "name"):
+            agent_name = specialist.name
         response = await run_specialist(
             agent=specialist,
             task=task,
