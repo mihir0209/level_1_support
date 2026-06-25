@@ -1,0 +1,15 @@
+{
+  "boohoo_uk": {
+    "return": "RETURN POLICY — Boohoo UK:\n• Return window: 28 days from delivery\n• Return cost: £1.99 (deducted from refund) — FREE for loyalty members\n• How to return: Log into boohoo.com, go to My Account > My Orders > Return Item. Attach the prepaid label and drop off at any Evri point.\n• Refund timeline: 3-5 business days after we receive your item\n• Non-returnable: swimwear, lingerie, pierced jewellery, beauty products (if seal broken), personalised items, sale items (unless faulty)\n• Exchanges: We don't offer direct exchanges. Return for a refund and place a new order.",
+    "delivery": "DELIVERY POLICY — Boohoo UK:\n• Standard delivery: 3-5 working days — £3.99 (free on orders over £35)\n• Next day delivery: Order by 10pm — £5.99\n• Nominated day delivery: Choose your day — £5.99\n• Collection: Collect from over 900 Evri points — £2.99\n• Weekend delivery: Friday-Sunday — £7.99\n• International: Available to 90+ countries, rates at checkout",
+    "payment": "PAYMENT POLICY — Boohoo UK:\n• We accept: Visa, Mastercard, American Express, PayPal, Klarna (buy now pay later), Laybuy (pay in 6 instalments), Boohoo gift cards\n• Klarna: Repayment is between you and Klarna. If we issue a refund, Klarna will be notified automatically.\n• Gift cards: Can be used alongside other payment methods."
+  },
+  "plt_uk": {
+    "return": "RETURN POLICY — PrettyLittleThing UK:\n• Return window: 28 days (14 days for sale items)\n• Return cost: £1.99 — FREE for PLT loyalty members\n• How to return: Use the returns portal at plt.co.uk/returns\n• Refund timeline: 5-7 business days after receipt\n• Non-returnable: Swimwear, lingerie, pierced jewellery, beauty products (seal broken), personalised items",
+    "delivery": "DELIVERY POLICY — PrettyLittleThing UK:\n• Standard delivery: 4-6 working days — £3.99\n• Express delivery: 2-3 working days — £5.99\n• Next day delivery: Order before 3pm — £7.99\n• Free delivery for PLT Pro members"
+  },
+  "karenmillen_uk": {
+    "return": "RETURN POLICY — Karen Millen UK:\n• Return window: 28 days\n• Return cost: FREE (complimentary returns for all customers)\n• How to return: Use the prepaid label inside your parcel or generate one at karenmillen.com/returns\n• Refund timeline: 3-5 business days\n• Non-returnable: Swimwear, lingerie, pierced jewellery, altered items",
+    "delivery": "DELIVERY POLICY — Karen Millen UK:\n• Standard delivery: 3-5 working days — FREE on orders over £50, otherwise £3.95\n• Express delivery: Next working day — £7.95\n• Named day delivery: £9.95\n• Collect from store: Free at 300+ locations"
+  }
+}

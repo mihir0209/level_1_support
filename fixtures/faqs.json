@@ -1,0 +1,38 @@
+{
+  "boohoo_uk": [
+    {
+      "question": "How do I return an item?",
+      "answer": "Log into your account, go to 'My Orders', select the order and click 'Return Item'. Pack the item, attach the prepaid label (for UK orders), and drop it off at any Evri parcel point. Refunds are processed within 3-5 business days of receipt."
+    },
+    {
+      "question": "How long does delivery take?",
+      "answer": "Standard delivery: 3-5 working days (£3.99). Next day delivery available for £5.99. Free standard delivery on orders over £35."
+    },
+    {
+      "question": "How do I track my order?",
+      "answer": "Log into your account and go to 'My Orders'. Click 'Track' next to your order. You'll receive a tracking link via email once dispatched."
+    },
+    {
+      "question": "What payment methods do you accept?",
+      "answer": "We accept Visa, Mastercard, American Express, PayPal, Klarna, Laybuy, and Boohoo gift cards."
+    },
+    {
+      "question": "How do I apply a promo code?",
+      "answer": "Enter your code at the checkout page in the 'Gift card or discount code' box and click 'Apply'. Only one promo code can be used per order unless stated otherwise."
+    }
+  ],
+  "plt_uk": [
+    {
+      "question": "How do I return an item?",
+      "answer": "Visit our returns portal at plt.co.uk/returns, enter your order number and email, then follow the steps to generate a prepaid return label. Returns are free for loyalty members."
+    },
+    {
+      "question": "What is your returns policy?",
+      "answer": "We accept returns within 28 days of delivery. Items must be unworn with original tags attached. Sale items can be returned within 14 days."
+    },
+    {
+      "question": "How can I track my order?",
+      "answer": "You'll receive a tracking number via SMS and email once your order is dispatched. You can also track via your account 'My Orders' page."
+    }
+  ]
+}

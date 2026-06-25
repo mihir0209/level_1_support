@@ -1,0 +1,16 @@
+{
+  "BH-12345-UK": {
+    "tracking_id": "EVRI-987654321",
+    "carrier": "Evri",
+    "estimated_delivery": "2026-06-26T18:00:00Z",
+    "current_status": "Out for delivery",
+    "tracking_url": "https://evri.com/track/EVRI-987654321"
+  },
+  "KM-55001-UK": {
+    "tracking_id": "DHL-112233445",
+    "carrier": "DHL",
+    "estimated_delivery": "2026-06-22T12:00:00Z",
+    "current_status": "Delivered",
+    "tracking_url": "https://dhl.com/track/DHL-112233445"
+  }
+}

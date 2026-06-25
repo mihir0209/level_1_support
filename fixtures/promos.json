@@ -1,0 +1,23 @@
+{
+  "SAVE10": {
+    "code": "SAVE10",
+    "discount_pct": 10,
+    "min_spend": 30.0,
+    "active": true,
+    "applies_to_brands": ["boohoo_uk", "plt_uk"]
+  },
+  "NEWCUST20": {
+    "code": "NEWCUST20",
+    "discount_pct": 20,
+    "min_spend": 25.0,
+    "active": true,
+    "applies_to_brands": null
+  },
+  "EXPIRED5": {
+    "code": "EXPIRED5",
+    "discount_pct": 5,
+    "min_spend": 0.0,
+    "active": false,
+    "applies_to_brands": null
+  }
+}

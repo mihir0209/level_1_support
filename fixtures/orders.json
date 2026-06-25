@@ -1,0 +1,110 @@
+{
+  "BH-12345-UK": {
+    "id": "BH-12345-UK",
+    "brand_id": "boohoo_uk",
+    "customer_id": "cust_001",
+    "status": "in_transit",
+    "placed_at": "2026-06-20T10:00:00Z",
+    "total_value": 45.99,
+    "currency": "GBP",
+    "items": [
+      {
+        "sku": "BH-DRESS-001",
+        "name": "Floral Wrap Dress",
+        "quantity": 1,
+        "price_paid": 35.99
+      }
+    ],
+    "shipment": {
+      "tracking_id": "EVRI-987654321",
+      "carrier": "Evri",
+      "estimated_delivery": "2026-06-26T18:00:00Z",
+      "current_status": "Out for delivery",
+      "tracking_url": "https://evri.com/track/EVRI-987654321"
+    }
+  },
+  "PLT-98765-UK": {
+    "id": "PLT-98765-UK",
+    "brand_id": "plt_uk",
+    "customer_id": "cust_002",
+    "status": "processing",
+    "placed_at": "2026-06-25T11:00:00Z",
+    "total_value": 29.00,
+    "currency": "GBP",
+    "items": [
+      {
+        "sku": "PLT-TOP-042",
+        "name": "Satin Cami Top",
+        "quantity": 2,
+        "price_paid": 14.50
+      }
+    ],
+    "shipment": null
+  },
+  "KM-55001-UK": {
+    "id": "KM-55001-UK",
+    "brand_id": "karenmillen_uk",
+    "customer_id": "cust_003",
+    "status": "delivered",
+    "placed_at": "2026-06-13T14:30:00Z",
+    "total_value": 189.00,
+    "currency": "GBP",
+    "items": [
+      {
+        "sku": "KM-COAT-007",
+        "name": "Tailored Wool Coat",
+        "quantity": 1,
+        "price_paid": 189.00
+      }
+    ],
+    "shipment": {
+      "tracking_id": "DHL-112233445",
+      "carrier": "DHL",
+      "estimated_delivery": "2026-06-22T12:00:00Z",
+      "current_status": "Delivered",
+      "tracking_url": "https://dhl.com/track/DHL-112233445"
+    }
+  },
+  "BH-77777-UK": {
+    "id": "BH-77777-UK",
+    "brand_id": "boohoo_uk",
+    "customer_id": "cust_001",
+    "status": "cancelled",
+    "placed_at": "2026-06-24T09:15:00Z",
+    "total_value": 12.50,
+    "currency": "GBP",
+    "items": [
+      {
+        "sku": "BH-SOCKS-002",
+        "name": "Ankle Socks 3-Pack",
+        "quantity": 1,
+        "price_paid": 12.50
+      }
+    ],
+    "shipment": null
+  },
+  "BH-88888-UK": {
+    "id": "BH-88888-UK",
+    "brand_id": "boohoo_uk",
+    "customer_id": "cust_001",
+    "status": "returned",
+    "placed_at": "2026-06-01T15:00:00Z",
+    "total_value": 55.00,
+    "currency": "GBP",
+    "items": [
+      {
+        "sku": "BH-JEANS-005",
+        "name": "Slim Fit Jeans",
+        "quantity": 1,
+        "price_paid": 55.00
+      }
+    ],
+    "shipment": {
+      "tracking_id": "EVRI-888888888",
+      "carrier": "Evri",
+      "estimated_delivery": "2026-06-04T12:00:00Z",
+      "current_status": "Delivered",
+      "tracking_url": "https://evri.com/track/EVRI-888888888"
+    }
+  }
+}
