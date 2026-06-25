@@ -6,7 +6,9 @@ Run via: python -m core.ontology.seed_data
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from typing import Any
 
 import structlog
 
@@ -708,7 +710,7 @@ def upsert_issue_type(graph, issue: IssueType) -> None:
                 "success_rate": resolution.success_rate,
                 "sample_size": resolution.sample_size,
                 "avg_satisfaction_score": resolution.avg_satisfaction_score,
-                "steps": str(steps_data),
+                "steps": json.dumps(steps_data),
                 "escalation_trigger": resolution.escalation_trigger,
                 "issue_id": issue.id,
             },
@@ -760,7 +762,195 @@ def seed_all(graph) -> None:
     except Exception as e:
         log.warning("customer_seed_failed", error=str(e))
 
+    log.info("seeding_kb_nodes", count=len(_KB_SEED))
+    seed_kb_nodes(graph)
+
     log.info("seed_complete")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# KB SEED DATA — FAQ, KnowledgeItem, DeliveryOption, ContactMethod nodes
+# These are what Pattern C (KB search) in retriever.py relies on.
+# Without these, KB search always returns empty and the full retrieval stack
+# silently degrades on every novel/unmatched query.
+# ════════════════════════════════════════════════════════════════════════════════
+
+_KB_SEED: list[dict] = [
+    # Boohoo UK FAQs
+    {
+        "brand_id": "boohoo_uk", "label": "FAQ",
+        "question": "How do I track my order?",
+        "answer": "Log into your Boohoo account and go to My Orders. Click Track next to your order. You'll receive a tracking link via email once your order is dispatched.",
+        "category": "delivery",
+    },
+    {
+        "brand_id": "boohoo_uk", "label": "FAQ",
+        "question": "How do I return an item?",
+        "answer": "Log into your account, go to My Orders, select the order and click Return Item. Pack the item, attach the prepaid label, and drop it off at any Evri parcel point. Refunds are processed within 3-5 business days of receipt.",
+        "category": "return",
+    },
+    {
+        "brand_id": "boohoo_uk", "label": "FAQ",
+        "question": "What payment methods do you accept?",
+        "answer": "We accept Visa, Mastercard, American Express, PayPal, Klarna (buy now pay later), Laybuy (pay in 6 instalments), and Boohoo gift cards.",
+        "category": "payment",
+    },
+    {
+        "brand_id": "boohoo_uk", "label": "FAQ",
+        "question": "How do I apply a promo code?",
+        "answer": "Enter your code at checkout in the Gift card or discount code box and click Apply. Only one promo code can be used per order unless stated otherwise.",
+        "category": "promotions",
+    },
+    {
+        "brand_id": "boohoo_uk", "label": "FAQ",
+        "question": "How long does delivery take?",
+        "answer": "Standard delivery: 3-5 working days for £3.99 (free on orders over £35). Next day delivery available for £5.99. Nominated day delivery also available.",
+        "category": "delivery",
+    },
+    # PLT UK FAQs
+    {
+        "brand_id": "plt_uk", "label": "FAQ",
+        "question": "What is your returns policy?",
+        "answer": "We accept returns within 28 days of delivery. Items must be unworn with original tags attached. Sale items can be returned within 14 days. Returns are free for PLT loyalty members (£1.99 for non-members).",
+        "category": "return",
+    },
+    {
+        "brand_id": "plt_uk", "label": "FAQ",
+        "question": "How do I track my PLT order?",
+        "answer": "You'll receive a tracking number via SMS and email once your order is dispatched. You can also track via your account My Orders page.",
+        "category": "delivery",
+    },
+    {
+        "brand_id": "plt_uk", "label": "FAQ",
+        "question": "How do I return an item to PLT?",
+        "answer": "Visit our returns portal at plt.co.uk/returns, enter your order number and email, then follow the steps to generate a prepaid return label.",
+        "category": "return",
+    },
+    # Karen Millen UK FAQs
+    {
+        "brand_id": "karenmillen_uk", "label": "FAQ",
+        "question": "What is your returns policy?",
+        "answer": "We offer complimentary returns for all customers — free returns within 28 days. Use the prepaid label inside your parcel or generate one at karenmillen.com/returns. Refunds processed within 3-5 business days.",
+        "category": "return",
+    },
+    {
+        "brand_id": "karenmillen_uk", "label": "FAQ",
+        "question": "Do you offer free delivery?",
+        "answer": "Standard delivery is free on orders over £50. For orders under £50, standard delivery is £3.95. Express delivery (next working day) is £7.95.",
+        "category": "delivery",
+    },
+    # Universal contact methods
+    {
+        "brand_id": "boohoo_uk", "label": "ContactMethod",
+        "title": "Live Chat",
+        "content": "Available 24/7 via the chat widget on boohoo.com. Average response time: under 2 minutes.",
+    },
+    {
+        "brand_id": "boohoo_uk", "label": "ContactMethod",
+        "title": "Email Support",
+        "content": "Email us at customer.services@boohoo.com. Response time: within 24 hours.",
+    },
+    {
+        "brand_id": "plt_uk", "label": "ContactMethod",
+        "title": "Live Chat",
+        "content": "Available via the chat widget on plt.co.uk. Average response time: under 3 minutes.",
+    },
+    {
+        "brand_id": "karenmillen_uk", "label": "ContactMethod",
+        "title": "Phone Support",
+        "content": "UK customers: 0344 800 0022 (9am-6pm, Mon-Fri). International: +44 161 222 2003.",
+    },
+    # Delivery options
+    {
+        "brand_id": "boohoo_uk", "label": "DeliveryOption",
+        "title": "Standard Delivery",
+        "content": "3-5 working days. £3.99 or free on orders over £35. Tracked via Evri.",
+        "category": "delivery",
+    },
+    {
+        "brand_id": "boohoo_uk", "label": "DeliveryOption",
+        "title": "Next Day Delivery",
+        "content": "Order by 10pm for next working day delivery. £5.99. Tracked via Evri.",
+        "category": "delivery",
+    },
+    {
+        "brand_id": "plt_uk", "label": "DeliveryOption",
+        "title": "Standard Delivery",
+        "content": "4-6 working days. £3.99 or free for PLT Pro members. Tracked.",
+        "category": "delivery",
+    },
+]
+
+
+def upsert_kb_node(graph, brand_id: str, label: str, title: str | None, question: str | None, answer: str | None, content: str | None, category: str | None) -> None:
+    """Upsert a generic KB node (FAQ, KnowledgeItem, DeliveryOption, ContactMethod)."""
+    props: dict[str, Any] = {
+        "brand_id": brand_id,
+    }
+    if question is not None:
+        props["question"] = question
+    if answer is not None:
+        props["answer"] = answer
+    if title is not None:
+        props["title"] = title
+    if content is not None:
+        props["content"] = content
+    if category is not None:
+        props["category"] = category
+
+    # Use a unique key: label + question/title (first 80 chars)
+    key = (question or title or "kb")[:80]
+
+    cypher = f"""
+    MERGE (n:{label} {{brand_id: $brand_id, key: $key}})
+    SET n.question = $question, n.answer = $answer,
+        n.title = $title, n.content = $content,
+        n.category = $category
+    WITH n
+    MATCH (b:Brand {{id: $brand_id}})
+    MERGE (b)-[:HAS_KNOWLEDGE]->(n)
+    """
+    graph.query(
+        cypher,
+        {
+            "brand_id": brand_id,
+            "key": key,
+            "question": question,
+            "answer": answer,
+            "title": title,
+            "content": content,
+            "category": category,
+        },
+    )
+
+
+def seed_kb_nodes(graph) -> None:
+    """Seed KB nodes (FAQ, KnowledgeItem, DeliveryOption, ContactMethod) for all brands."""
+    count = 0
+    for item in _KB_SEED:
+        try:
+            upsert_kb_node(
+                graph,
+                brand_id=item["brand_id"],
+                label=item["label"],
+                title=item.get("title"),
+                question=item.get("question"),
+                answer=item.get("answer"),
+                content=item.get("content"),
+                category=item.get("category"),
+            )
+            count += 1
+        except Exception as e:
+            log.warning("kb_node_seed_failed", brand_id=item["brand_id"], error=str(e))
+    log.info("kb_nodes_seeded", count=count)
+
+
+def seed_all_with_kb(graph) -> None:
+    """Full seed: brands, policies, issue types, customers, and KB nodes."""
+    seed_all(graph)
+    log.info("seeding_kb_nodes", count=len(_KB_SEED))
+    seed_kb_nodes(graph)
+    log.info("seed_with_kb_complete")
 
 
 if __name__ == "__main__":
@@ -769,5 +959,5 @@ if __name__ == "__main__":
     _, graph = get_graph_client()
     from core.ontology.schema import create_schema
     create_schema(graph)
-    seed_all(graph)
-    print("✓ Boohoo Group knowledge graph seeded successfully.")
+    seed_all_with_kb(graph)
+    print("✓ Boohoo Group knowledge graph seeded successfully with KB nodes.")

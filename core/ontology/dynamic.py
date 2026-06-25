@@ -257,9 +257,32 @@ class OntologyManager:
                 "MATCH (op:OntologyProposal {proposal_id: $pid}) SET op.status = 'active'",
                 {"pid": proposal_id},
             )
+            # Dynamically create indexes for the new node type — brand_id is the
+            # most-filtered field; also index by id if present in properties.
+            self._create_indexes_for_type(label, properties)
             log.info("ontology_type_activated", label=label, brand_id=brand_id)
         except Exception as e:
             log.error("ontology_activate_failed", label=label, error=str(e))
+
+    def _create_indexes_for_type(self, label: str, properties: list[str]) -> None:
+        """
+        Create FalkorDB indexes for a dynamically activated entity type.
+        Always indexes brand_id (multi-tenant isolation). Also indexes 'id'
+        if present in the properties list.
+        """
+        try:
+            graph = self._get_graph()
+            indexes = [f"CREATE INDEX FOR (n:{label}) ON (n.brand_id)"]
+            if "id" in properties:
+                indexes.append(f"CREATE INDEX FOR (n:{label}) ON (n.id)")
+            for cypher in indexes:
+                try:
+                    graph.query(cypher)
+                except Exception as e:
+                    if "already indexed" not in str(e).lower():
+                        log.warning("dynamic_index_create_failed", cypher=cypher, label=label, error=str(e))
+        except Exception as e:
+            log.warning("index_creation_skipped", label=label, error=str(e))
 
     def merge_entity_type(
         self,

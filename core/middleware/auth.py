@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Security
 from fastapi.security import APIKeyHeader
 
+import secrets
 from config import settings
 
 admin_key_header = APIKeyHeader(name="X-ADMIN-KEY", auto_error=False)
@@ -28,6 +29,6 @@ async def verify_admin_key(key: str | None = Security(admin_key_header)) -> str:
             status_code=401,
             detail="Missing X-ADMIN-KEY header. Set ADMIN_API_KEY env var.",
         )
-    if key != expected:
+    if not secrets.compare_digest(key, expected):
         raise HTTPException(status_code=403, detail="Invalid X-ADMIN-KEY.")
     return key

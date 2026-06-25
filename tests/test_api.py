@@ -203,11 +203,12 @@ class TestChat:
     def mock_graph(self, monkeypatch):
         """Mock the LangGraph pipeline to return a canned response."""
         from langchain_core.messages import AIMessage
-        from core.ontology.models import SessionOutcome, IntentResult, IssueCategory
+        from core.ontology.models import SessionOutcome, IntentResult
+        from core.taxonomy import SupportCategory
 
         mock_result = {
             "messages": [AIMessage(content="Your order BH-12345 is currently in transit with Evri. Expected delivery tomorrow.")],
-            "intent": IntentResult(issue_type="wismo", category=IssueCategory.DELIVERY, confidence=0.95, entities={}),
+            "intent": IntentResult(issue_type="wismo", category=SupportCategory.SERVICE_STATUS, confidence=0.95, entities={}),
             "turn_count": 1,
             "resolution_attempts": 1,
             "is_resolved": False,
@@ -254,11 +255,12 @@ class TestChat:
     def test_chat_resolved_session(self, client, monkeypatch):
         """Session marked resolved → is_resolved True in response."""
         from langchain_core.messages import AIMessage
-        from core.ontology.models import SessionOutcome, IntentResult, IssueCategory
+        from core.ontology.models import SessionOutcome, IntentResult
+        from core.taxonomy import SupportCategory
 
         mock_result = {
             "messages": [AIMessage(content="Great! Your return label has been emailed. Refund in 5-7 days.")],
-            "intent": IntentResult(issue_type="return_initiate", category=IssueCategory.RETURN, confidence=0.91, entities={}),
+            "intent": IntentResult(issue_type="return_initiate", category=SupportCategory.BILLING, confidence=0.91, entities={}),
             "turn_count": 2,
             "resolution_attempts": 1,
             "is_resolved": True,
@@ -283,11 +285,12 @@ class TestChat:
     def test_chat_escalated_session(self, client, monkeypatch):
         """Session escalated → is_escalated True in response."""
         from langchain_core.messages import AIMessage
-        from core.ontology.models import SessionOutcome, IntentResult, IssueCategory
+        from core.ontology.models import SessionOutcome, IntentResult
+        from core.taxonomy import SupportCategory
 
         mock_result = {
             "messages": [AIMessage(content="I'm connecting you with a specialist who can help.")],
-            "intent": IntentResult(issue_type="escalate", category=IssueCategory.ORDER, confidence=0.85, entities={}),
+            "intent": IntentResult(issue_type="escalate", category=SupportCategory.SERVICE_STATUS, confidence=0.85, entities={}),
             "turn_count": 5,
             "resolution_attempts": 3,
             "is_resolved": False,
@@ -330,11 +333,12 @@ class TestChatwootWebhook:
     @pytest.fixture
     def mock_graph_for_webhook(self, monkeypatch):
         from langchain_core.messages import AIMessage
-        from core.ontology.models import SessionOutcome, IntentResult, IssueCategory
+        from core.ontology.models import SessionOutcome, IntentResult
+        from core.taxonomy import SupportCategory
 
         mock_result = {
             "messages": [AIMessage(content="Thank you for contacting us. How can I help?")],
-            "intent": IntentResult(issue_type="wismo", category=IssueCategory.DELIVERY, confidence=0.80, entities={}),
+            "intent": IntentResult(issue_type="wismo", category=SupportCategory.SERVICE_STATUS, confidence=0.80, entities={}),
             "turn_count": 1,
             "resolution_attempts": 0,
             "is_resolved": False,

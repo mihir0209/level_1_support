@@ -86,6 +86,8 @@ class EndpointSpec:
     requires_auth: bool
     tags: list[str]
     is_active: bool
+    connector_type: str = "http"
+    connector_config: dict | None = None
 
 
 @dataclass
@@ -100,6 +102,8 @@ class APIToolSpec:
     body_schema: dict | None
     requires_auth: bool
     tags: list[str]
+    connector_type: str = "http"
+    connector_config: dict | None = None
 
 
 # ── Curl parser ─────────────────────────────────────────────────────────────────
@@ -202,9 +206,9 @@ def describe_from_curl(curl_cmd: str) -> str:
 # ── Postgres helpers ──────────────────────────────────────────────────────────────
 
 def _get_pool():
-    """Lazily create DB pool from settings."""
-    import psycopg
-    return psycopg.connect(**settings.postgres_conn_params())
+    """Get connection from global sync pool using ConnectionProxy."""
+    from core.db.pool import get_sync_pool, ConnectionProxy
+    return ConnectionProxy(get_sync_pool())
 
 
 def _fernet_for(key_bytes: bytes) -> Fernet:
@@ -258,6 +262,8 @@ def register_endpoint(
     requires_auth: bool = False,
     tags: list[str] | None = None,
     curl_command: str | None = None,
+    connector_type: str = "http",
+    connector_config: dict | None = None,
 ) -> str:
     """
     Register a single endpoint. Accepts either explicit params or a curl command.
@@ -286,10 +292,10 @@ def register_endpoint(
                     INSERT INTO registered_api_endpoints
                         (id, brand_api_config_id, name, description, method, path,
                          query_params, body_schema, response_schema, rate_limit_per_min,
-                         requires_auth, tags, is_active)
+                         requires_auth, tags, is_active, connector_type, connector_config)
                     VALUES (gen_random_uuid(), %(config_id)s, %(name)s, %(desc)s, %(method)s, %(path)s,
                             %(query_params)s, %(body_schema)s, %(response_schema)s,
-                            %(rate_limit)s, %(requires_auth)s, %(tags)s, true)
+                            %(rate_limit)s, %(requires_auth)s, %(tags)s, true, %(connector_type)s, %(connector_config)s)
                     ON CONFLICT (brand_api_config_id, name) DO UPDATE SET
                         description = EXCLUDED.description,
                         method = EXCLUDED.method,
@@ -300,6 +306,8 @@ def register_endpoint(
                         rate_limit_per_min = EXCLUDED.rate_limit_per_min,
                         requires_auth = EXCLUDED.requires_auth,
                         tags = EXCLUDED.tags,
+                        connector_type = EXCLUDED.connector_type,
+                        connector_config = EXCLUDED.connector_config,
                         updated_at = NOW()
                     RETURNING id
                 """, {
@@ -314,6 +322,8 @@ def register_endpoint(
                     "rate_limit": rate_limit_per_min,
                     "requires_auth": requires_auth,
                     "tags": tags or [],
+                    "connector_type": connector_type,
+                    "connector_config": json.dumps(connector_config) if connector_config else None,
                 })
                 return str(cur.fetchone()[0])
     finally:
@@ -387,7 +397,7 @@ def list_endpoints_for_brand(brand_id: str) -> list[EndpointSpec]:
                     SELECT e.id, e.brand_api_config_id, e.name, e.description,
                            e.method, e.path, e.query_params, e.body_schema,
                            e.response_schema, e.rate_limit_per_min, e.requires_auth,
-                           e.tags, e.is_active
+                           e.tags, e.is_active, e.connector_type, e.connector_config
                     FROM registered_api_endpoints e
                     JOIN brand_api_config c ON c.id = e.brand_api_config_id
                     WHERE c.brand_id = %(brand_id)s AND e.is_active = true
@@ -408,6 +418,8 @@ def list_endpoints_for_brand(brand_id: str) -> list[EndpointSpec]:
                         requires_auth=r[10],
                         tags=r[11] or [],
                         is_active=r[12],
+                        connector_type=r[13] if len(r) > 13 and r[13] else "http",
+                        connector_config=json.loads(r[14]) if len(r) > 14 and r[14] else None,
                     )
                     for r in rows
                 ]
@@ -534,6 +546,8 @@ def build_tool_manifest_for_brand(brand_id: str) -> list[APIToolSpec]:
             body_schema=ep.body_schema,
             requires_auth=ep.requires_auth,
             tags=ep.tags,
+            connector_type=ep.connector_type,
+            connector_config=ep.connector_config,
         )
         for ep in endpoints
     ]

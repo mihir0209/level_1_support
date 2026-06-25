@@ -274,7 +274,7 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
     )
 
     try:
-        specialist = get_agent_for_intent(intent_id)
+        specialist = get_agent_for_intent(intent_id, state.brand_id)
         response = await run_specialist(
             agent=specialist,
             task=task,

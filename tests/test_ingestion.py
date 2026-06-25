@@ -75,6 +75,42 @@ class TestExtractor:
         assert facts.high_confidence_items == 3  # all >= 0.85
 
     @pytest.mark.asyncio
+    async def test_extract_facts_suggested_categories(self, monkeypatch):
+        """LLM returns suggested_categories → ExtractedFacts parses them correctly."""
+        from ingestion.crawler import CrawledPage
+        from ingestion import extractor as ext
+
+        mock_llm_response = json.dumps({
+            "policies": [],
+            "faqs": [
+                {
+                    "question": "How to unlock plan?",
+                    "answer": "Contact network team.",
+                    "intent_tags": [],
+                    "suggested_categories": ["plan_unlock", "network_trouble"],
+                    "confidence": 0.89,
+                }
+            ],
+            "brand_facts": [],
+        })
+
+        class MockLLMClient:
+            async def generate(self, prompt, system, max_tokens, fast):
+                return mock_llm_response
+
+        monkeypatch.setattr(ext, "get_llm_client", lambda: MockLLMClient())
+
+        page = CrawledPage(
+            url="https://telecom.com/help",
+            brand_id="telecom_brand",
+            markdown="How to unlock plan",
+            title="Help",
+        )
+        facts = await ext.extract_facts(page)
+        assert len(facts.faqs) == 1
+        assert facts.faqs[0].suggested_categories == ["plan_unlock", "network_trouble"]
+
+    @pytest.mark.asyncio
     async def test_extract_facts_bad_json_returns_empty(self, monkeypatch):
         """If LLM returns invalid JSON → ExtractedFacts with 0 items (no exception)."""
         from ingestion.crawler import CrawledPage
@@ -204,6 +240,26 @@ class TestValidator:
         summary = report.summary()
         assert summary["total"] == report.total
         assert summary["auto_approve"] + summary["human_review"] + summary["rejected"] == summary["total"]
+
+    def test_suggested_categories_validation_preserved(self):
+        from ingestion.validator import validate_facts
+        from ingestion.extractor import ExtractedFacts, ExtractedFAQ
+
+        facts = ExtractedFacts(brand_id="boohoo_uk", source_url="https://boohoo.com")
+        facts.faqs.append(ExtractedFAQ(
+            question="What is this?",
+            answer="This is a test Q&A pair.",
+            intent_tags=["custom_tag"],
+            suggested_categories=["suggested_tag"],
+            confidence=0.90,
+        ))
+
+        report = validate_facts(facts)
+        assert len(report.auto_approve) == 1
+        validated_faq = report.auto_approve[0]
+        assert validated_faq.item_data["intent_tags"] == ["custom_tag"]
+        assert validated_faq.item_data["suggested_categories"] == ["suggested_tag"]
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════

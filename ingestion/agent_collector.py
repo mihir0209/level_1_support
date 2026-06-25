@@ -1301,28 +1301,50 @@ async def _write_graph(items: list[dict], brand_id: str) -> int:
         _, graph = get_graph_client()
         for item in items:
             et = item.get("entity_type", "KnowledgeItem")
-            title = str(item.get("title", ""))[:200].replace("'", "")
-            content = str(item.get("content", ""))[:2000].replace("'", "")
-            cat = str(item.get("category", "general")).replace("'", "")
-            src = str(item.get("source_url", "")).replace("'", "")
-            kw = json.dumps(item.get("keywords", [])).replace("'", "")
+            title = str(item.get("title", ""))[:200]
+            content = str(item.get("content", ""))[:2000]
+            cat = str(item.get("category", "general"))
+            src = str(item.get("source_url", ""))
+            kw = json.dumps(item.get("keywords", []))
             nid = f"{brand_id}_{uuid.uuid4().hex[:8]}"
 
             if et == "FAQ":
                 graph.query(
-                    f"MERGE (n:FAQ {{id:'{nid}'}}) "
-                    f"SET n.question='{title}',n.answer='{content}',"
-                    f"    n.category='{cat}',n.keywords='{kw}',"
-                    f"    n.brand_id='{brand_id}',n.source_url='{src}' "
-                    f"WITH n MATCH (b:Brand {{id:'{brand_id}'}}) MERGE (b)-[:HAS_FAQ]->(n)"
+                    """
+                    MERGE (n:FAQ {id: $nid})
+                    SET n.question = $title, n.answer = $content,
+                        n.category = $cat, n.keywords = $kw,
+                        n.brand_id = $brand_id, n.source_url = $src
+                    WITH n MATCH (b:Brand {id: $brand_id}) MERGE (b)-[:HAS_FAQ]->(n)
+                    """,
+                    {
+                        "nid": nid,
+                        "title": title,
+                        "content": content,
+                        "cat": cat,
+                        "kw": kw,
+                        "brand_id": brand_id,
+                        "src": src,
+                    }
                 )
             elif et in ("Policy", "returns_policy", "shipping_policy"):
                 pt = cat if cat in ("returns", "shipping", "privacy") else "general"
                 graph.query(
-                    f"MERGE (n:Policy {{id:'{nid}'}}) "
-                    f"SET n.policy_type='{pt}',n.title='{title}',"
-                    f"    n.content='{content}',n.brand_id='{brand_id}',n.source_url='{src}' "
-                    f"WITH n MATCH (b:Brand {{id:'{brand_id}'}}) MERGE (b)-[:HAS_POLICY {{type:'{pt}'}}]->(n)"
+                    """
+                    MERGE (n:Policy {id: $nid})
+                    SET n.policy_type = $pt, n.title = $title,
+                        n.content = $content, n.brand_id = $brand_id,
+                        n.source_url = $src
+                    WITH n MATCH (b:Brand {id: $brand_id}) MERGE (b)-[:HAS_POLICY {type: $pt}]->(n)
+                    """,
+                    {
+                        "nid": nid,
+                        "pt": pt,
+                        "title": title,
+                        "content": content,
+                        "brand_id": brand_id,
+                        "src": src,
+                    }
                 )
             else:
                 # Use the actual entity_type as node label — aligns with ontology schema.
@@ -1330,11 +1352,24 @@ async def _write_graph(items: list[dict], brand_id: str) -> int:
                 node_label = _valid_node_label(et)
                 ext = item.get("extracted_at", datetime.now(timezone.utc).isoformat())
                 graph.query(
-                    f"MERGE (n:{node_label} {{id:'{nid}'}}) "
-                    f"SET n.entity_type='{et}',n.title='{title}',"
-                    f"    n.content='{content}',n.category='{cat}',"
-                    f"    n.brand_id='{brand_id}',n.source_url='{src}',n.extracted_at='{ext}' "
-                    f"WITH n MATCH (b:Brand {{id:'{brand_id}'}}) MERGE (b)-[:HAS_KNOWLEDGE]->(n)"
+                    f"""
+                    MERGE (n:{node_label} {{id: $nid}})
+                    SET n.entity_type = $et, n.title = $title,
+                        n.content = $content, n.category = $cat,
+                        n.brand_id = $brand_id, n.source_url = $src,
+                        n.extracted_at = $ext
+                    WITH n MATCH (b:Brand {{id: $brand_id}}) MERGE (b)-[:HAS_KNOWLEDGE]->(n)
+                    """,
+                    {
+                        "nid": nid,
+                        "et": et,
+                        "title": title,
+                        "content": content,
+                        "cat": cat,
+                        "brand_id": brand_id,
+                        "src": src,
+                        "ext": ext,
+                    }
                 )
             written += 1
     except Exception as e:

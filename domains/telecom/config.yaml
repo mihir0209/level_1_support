@@ -1,0 +1,155 @@
+# Telecom domain config — L1 Support taxonomy, tools, and specialist mapping.
+#
+# This is a template/seed for adding telecom industry support.
+# Telecom brands have fundamentally different issue types:
+#   - Network status (outages, slow speeds, coverage)
+#   - Billing (plan charges, disputes, top-ups)
+#   - Device (SIM replacement, handset issues, porting)
+#   - Account (suspension, fraud lock, plan changes)
+#
+# To activate this domain:
+#   1. Add telecom brands to brands/registry.py with domain="telecom"
+#   2. Register telecom tools in core/tools/registry.py
+#   3. Create telecom specialist prompts in core/agents/specialists.py
+
+domain_id: telecom
+domain_name: "Telecommunications"
+description: "Telecom provider support — mobile, internet, and landline services."
+
+# ── Category mapping ─────────────────────────────────────────────────────────
+
+category_mapping:
+  network_outage:    fault
+  slow_speed:       fault
+  billing_dispute:   billing
+  plan_change:       billing
+  device_issue:      fault
+  sim_replacement:   service_status
+  number_porting:    service_status
+  account_locked:    account
+  contract_query:    information
+  info:              information
+  unknown:           information
+
+# ── IssueType definitions ─────────────────────────────────────────────────────
+
+issue_types:
+  network_outage:
+    name: "Network Outage"
+    description: "Customer reporting no service or complete network outage."
+    category: fault
+    avg_resolution_time_seconds: 120
+    specialist: network_agent
+
+  slow_speed:
+    name: "Slow Connection Speed"
+    description: "Customer experiencing degraded internet or data speeds."
+    category: fault
+    avg_resolution_time_seconds: 180
+    specialist: network_agent
+
+  billing_dispute:
+    name: "Billing Dispute"
+    description: "Customer disputing charges on their bill."
+    category: billing
+    avg_resolution_time_seconds: 300
+    specialist: billing_agent
+
+  plan_change:
+    name: "Plan Upgrade or Downgrade"
+    description: "Customer wants to change their service plan."
+    category: billing
+    avg_resolution_time_seconds: 120
+    specialist: billing_agent
+
+  device_issue:
+    name: "Device or Handset Issue"
+    description: "SIM card, handset, or device connectivity problem."
+    category: fault
+    avg_resolution_time_seconds: 180
+    specialist: device_agent
+
+  sim_replacement:
+    name: "SIM Replacement"
+    description: "Customer requesting a replacement SIM card."
+    category: service_status
+    avg_resolution_time_seconds: 60
+    specialist: device_agent
+
+  number_porting:
+    name: "Number Porting"
+    description: "Customer wants to keep their phone number when switching."
+    category: service_status
+    avg_resolution_time_seconds: 240
+    specialist: account_agent
+
+  account_locked:
+    name: "Account Access Issue"
+    description: "Cannot log in or account is suspended."
+    category: account
+    avg_resolution_time_seconds: 90
+    specialist: account_agent
+
+  contract_query:
+    name: "Contract Information"
+    description: "Customer asking about contract terms, early exit fees, or renewal."
+    category: information
+    avg_resolution_time_seconds: 60
+    specialist: info_agent
+
+  info:
+    name: "General Information"
+    description: "General query about services, coverage, or plans."
+    category: information
+    avg_resolution_time_seconds: 60
+    specialist: info_agent
+
+# ── Tool manifest ─────────────────────────────────────────────────────────────
+# TODO (Phase 2): Register telecom-specific tools
+
+tool_manifest:
+  network_outage:    [network_status_check]
+  slow_speed:       [speed_test_lookup, network_status_check]
+  billing_dispute:   [billing_lookup, dispute_create]
+  plan_change:       [plan_lookup, plan_change_request]
+  device_issue:      [device_diagnostic, sim_replacement_request]
+  sim_replacement:   [sim_replacement_request]
+  number_porting:    [porting_status, porting_request]
+  account_locked:   [account_status, escalate]
+  contract_query:   [contract_lookup, plan_lookup]
+  info:             [faq_search, policy_search]
+  unknown:          [escalate]
+
+# ── Specialist routing ────────────────────────────────────────────────────────
+# TODO (Phase 2): Implement telecom specialist agents
+
+specialist_agents:
+  network_agent:
+    name: "Network-Agent"
+    description: "Handles network outages and speed issues"
+
+  billing_agent:
+    name: "Billing-Agent"
+    description: "Handles billing disputes and plan changes"
+
+  device_agent:
+    name: "Device-Agent"
+    description: "Handles SIM replacement and device issues"
+
+  account_agent:
+    name: "Account-Agent"
+    description: "Handles account access and porting"
+
+  info_agent:
+    name: "Info-Agent"
+    description: "Answers general service and plan queries"
+
+# ── Tier display names ────────────────────────────────────────────────────────
+
+brand_tiers:
+  premium:
+    display_name: "Premium"
+  mid:
+    display_name: "Standard"
+  budget:
+    display_name: "Pay-as-you-go"

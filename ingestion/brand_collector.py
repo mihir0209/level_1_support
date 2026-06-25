@@ -663,11 +663,8 @@ async def _write_to_pgvector(brand_id: str, url: str, extracted: dict) -> None:
         content = "\n".join(parts).strip()
         if len(content) < 30:
             return
-        conn = psycopg.connect(
-            host=settings.postgres_host, port=settings.postgres_port,
-            dbname=settings.postgres_db, user=settings.postgres_user,
-            password=settings.postgres_password,
-        )
+        from core.db.pool import get_sync_pool, ConnectionProxy
+        conn = ConnectionProxy(get_sync_pool())
         try:
             cur = conn.cursor()
             cur.execute(

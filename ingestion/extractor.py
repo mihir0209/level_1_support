@@ -26,16 +26,33 @@ from ingestion.crawler import CrawledPage
 
 log = structlog.get_logger(__name__)
 
-# ── Extraction prompts ────────────────────────────────────────────────────────
+# ── Extraction prompts (built dynamically per domain config) ──────────────────
 
-_SYSTEM_PROMPT = """You are a data extraction specialist for e-commerce support knowledge bases.
+def build_system_prompt(domain_cfg: Any) -> str:
+    domain_name = domain_cfg.domain_name
+    return f"""You are a data extraction specialist for {domain_name} support knowledge bases.
 Extract structured facts from the provided support page markdown.
 Return ONLY valid JSON — no explanation, no markdown fences.
-All monetary values should be in the currency shown (GBP/USD/EUR).
+All monetary/numeric values should be in the format shown.
 Dates should be ISO 8601. Unknown values use null."""
 
-_EXTRACTION_PROMPT = """Extract all support-relevant facts from this {brand_id} support page.
 
+def build_extraction_prompt(brand_id: str, url: str, title: str, content: str, domain_cfg: Any) -> str:
+    domain_name = domain_cfg.domain_name
+    intent_tags = [it_id for it_id in domain_cfg.issue_type_ids if it_id not in ("info", "unknown")]
+
+    # Define a clean list of policy types based on the categories
+    policy_types = ["general", "cancellation", "terms", "sla"]
+    if domain_cfg.domain_id == "ecommerce":
+        policy_types.extend(["return", "shipping", "payment", "warranty"])
+    elif domain_cfg.domain_id == "telecom":
+        policy_types.extend(["billing", "network", "usage", "device"])
+
+    policy_types_str = "|".join(policy_types)
+    intent_tags_str = ", ".join(f'"{t}"' for t in intent_tags)
+
+    return f"""Extract all support-relevant facts from this {domain_name} support page.
+Brand: {brand_id}
 URL: {url}
 Page title: {title}
 
@@ -47,7 +64,7 @@ Return JSON with this exact structure:
 {{
   "policies": [
     {{
-      "type": "return|shipping|payment|cancellation|warranty",
+      "type": "{policy_types_str}",
       "summary": "one-sentence summary",
       "conditions": [{{"condition": "str", "value": "str"}}],
       "valid_from": "ISO date or null",
@@ -60,7 +77,8 @@ Return JSON with this exact structure:
     {{
       "question": "str",
       "answer": "str",
-      "intent_tags": ["wismo", "return", "refund", "payment", "product", "account", "promo"],
+      "intent_tags": [{intent_tags_str}],
+      "suggested_categories": ["new_category_slug"],
       "confidence": 0.0-1.0
     }}
   ],
@@ -71,7 +89,9 @@ Return JSON with this exact structure:
       "confidence": 0.0-1.0
     }}
   ]
-}}"""
+}}
+
+If a Q&A pair does not fit any standard intent tags, suggest a new, brand-specific support category slug in suggested_categories (e.g., "network_troubleshooting", "account_suspension", etc.)."""
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -92,6 +112,7 @@ class ExtractedFAQ:
     question: str
     answer: str
     intent_tags: list[str] = field(default_factory=list)
+    suggested_categories: list[str] = field(default_factory=list)
     confidence: float = 0.0
 
 
@@ -176,6 +197,7 @@ def _parse_extracted(data: dict[str, Any], brand_id: str, url: str) -> Extracted
                 question=str(f.get("question", "")),
                 answer=str(f.get("answer", "")),
                 intent_tags=f.get("intent_tags", []),
+                suggested_categories=f.get("suggested_categories", []),
                 confidence=float(f.get("confidence", 0.5)),
             ))
         except (TypeError, ValueError) as exc:
@@ -201,20 +223,29 @@ async def extract_facts(page: CrawledPage) -> ExtractedFacts:
     Uses the primary (non-fast) model for accuracy.
     Returns ExtractedFacts (may have 0 items if page is not relevant).
     """
+    from brands.registry import get_brand_by_id
+    from domains.loader import get_domain_config
+
+    brand_entry = get_brand_by_id(page.brand_id)
+    domain = brand_entry.domain if brand_entry else "ecommerce"
+    domain_cfg = get_domain_config(domain)
+
     llm = get_llm_client()
     content = _truncate_content(page.markdown)
 
-    prompt = _EXTRACTION_PROMPT.format(
+    prompt = build_extraction_prompt(
         brand_id=page.brand_id,
         url=page.url,
         title=page.title or "(no title)",
         content=content,
+        domain_cfg=domain_cfg,
     )
+    system_prompt = build_system_prompt(domain_cfg)
 
     try:
         raw = await llm.generate(
             prompt=prompt,
-            system=_SYSTEM_PROMPT,
+            system=system_prompt,
             max_tokens=4096,
             fast=False,
         )

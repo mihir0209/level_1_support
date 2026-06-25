@@ -88,6 +88,23 @@ async def _upsert_to_graph(result: ValidationResult) -> bool:
             )
             graph.query(query)
 
+            # Discover and register new taxonomies dynamically in FalkorDB
+            import re as _re
+            suggested = d.get("suggested_categories", [])
+            for cat in suggested:
+                cat_safe = _re.sub(r"[^a-zA-Z0-9_]", "_", cat).lower()
+                if cat_safe:
+                    graph.query(
+                        f"MERGE (it:IssueType {{id: '{cat_safe}'}}) "
+                        f"ON CREATE SET it.name = '{cat.replace('_', ' ').title()}', "
+                        f"               it.description = 'Dynamically discovered category from ingestion', "
+                        f"               it.brand_id = '{result.brand_id}', "
+                        f"               it.category = 'information' "
+                        f"WITH it "
+                        f"MATCH (f:FAQ {{faq_id: '{faq_id}'}}) "
+                        f"MERGE (it)-[:HAS_FAQ]->(f)"
+                    )
+
         elif result.item_type == "brand_fact":
             d = result.item_data
             fact_id = f"{result.brand_id}_fact_{result.content_hash}"

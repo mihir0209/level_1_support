@@ -70,102 +70,173 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
 
     def _execute_tool(kwargs: dict | None = None, **kw) -> str:
         """
-        Fire the HTTP request. Credentials are decrypted per brand.
+        Execute the dynamic tool based on its connector type.
         Returns JSON string on success, error string on failure.
         """
-        conn = _get_pool()
-        try:
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT c.base_url, c.default_headers, c.brand_id
-                        FROM brand_api_config c
-                        JOIN registered_api_endpoints e ON e.brand_api_config_id = c.id
-                        WHERE e.name = %(name)s AND e.is_active = true AND c.is_active = true
-                        LIMIT 1
-                    """, {"name": spec.name})
+        # 1. SQL Connector
+        if getattr(spec, "connector_type", "http") == "sql":
+            config = getattr(spec, "connector_config", None) or {}
+            query = config.get("query")
+            if not query:
+                return "Error: SQL query not configured for this tool."
 
-                    row = cur.fetchone()
-                    if not row:
-                        return f"Error: brand API config not found for {spec.name}"
-                    base_url, default_headers_raw, brand_id_for_url = row
-                    headers = json.loads(default_headers_raw) if default_headers_raw else {}
-        finally:
-            conn.close()
+            all_params = {}
+            if kwargs:
+                all_params.update(kwargs)
+            all_params.update(kw)
 
-        all_params = {}
-        if kwargs:
-            all_params.update(kwargs)
-        all_params.update(kw)
+            # Convert :param to %(param)s for psycopg compatibility
+            formatted_query = query
+            param_names = re.findall(r":([a-zA-Z0-9_]+)", query)
+            for p_name in param_names:
+                formatted_query = formatted_query.replace(f":{p_name}", f"%({p_name})s")
 
-        if spec.requires_auth:
-            cred = _get_credential_for_spec(spec.name)
-            if cred:
-                if cred["type"] == "bearer":
-                    headers["Authorization"] = f"Bearer {cred['value']}"
-                elif cred["type"] == "api_key":
-                    headers["X-API-Key"] = cred["value"]
-                elif cred["type"] == "basic":
-                    import base64
-                    encoded = base64.b64encode(f"{cred['username']}:{cred['password']}".encode()).decode()
-                    headers["Authorization"] = f"Basic {encoded}"
+            try:
+                from psycopg.rows import dict_row
+                pool = _get_pool()
+                with pool.connection() as conn:
+                    with conn.cursor(row_factory=dict_row) as cur:
+                        cur.execute(formatted_query, all_params)
+                        if cur.description:
+                            rows = cur.fetchall()
+                            return json.dumps(rows, default=str, indent=2)
+                        else:
+                            return json.dumps({"status": "success", "rowcount": cur.rowcount})
+            except Exception as e:
+                log.error("sql_tool_execution_failed", tool_name=spec.name, error=str(e))
+                return f"Database error: {e}"
 
-        # Build URL — substitute path params, handle brand-prefixed APIs
-        path = spec.path or "/"
-        # Substitute path parameters {param} with values from all_params
-        for k, v in list(all_params.items()):
-            if f"{{{k}}}" in path:
-                path = path.replace(f"{{{k}}}", str(v))
-                del all_params[k]
-        # Prepend brand_id for brand-prefixed APIs (demo API pattern)
-        if path.startswith("/api/v1/"):
-            path = f"/{brand_id_for_url}{path}"
-        url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+        # 2. Python Connector
+        elif getattr(spec, "connector_type", "http") == "python":
+            config = getattr(spec, "connector_config", None) or {}
+            module_name = config.get("module")
+            function_name = config.get("function")
+            code = config.get("code")
 
-        query_params = {
-            p["name"]: all_params.pop(p["name"])
-            for p in (spec.query_params or [])
-            if p["name"] in all_params
-        }
+            all_params = {}
+            if kwargs:
+                all_params.update(kwargs)
+            all_params.update(kw)
 
-        body = dict(all_params)
-
-        try:
-            span_name = f"tool.http.{spec.method.lower()}"
-            with get_tracer().start_as_current_span(span_name) as span:
-                set_span_attributes(
-                    span,
-                    tool_name=spec.name,
-                    http_method=spec.method,
-                    http_url=url,
-                    brand_id=brand_id_for_url,
-                    requires_auth=spec.requires_auth,
-                )
-                resp = http_request(
-                    spec.method,
-                    url,
-                    headers=headers,
-                    params=query_params or None,
-                    json_body=body if body and spec.method in ("POST", "PUT", "PATCH") else None,
-                    timeout=15,
-                )
-                set_span_attributes(span, http_status_code=resp.status_code)
-                if not resp.ok:
-                    log.warning(
-                        "tool_http_failed",
-                        tool=spec.name,
-                        status=resp.status_code,
-                        url=url,
-                    )
-            if resp.ok:
+            if module_name and function_name:
                 try:
-                    return json.dumps(resp.json(), indent=2)
-                except json.JSONDecodeError:
-                    return resp.text
+                    import importlib
+                    mod = importlib.import_module(module_name)
+                    func = getattr(mod, function_name)
+                    res = func(**all_params)
+                    if isinstance(res, str):
+                        return res
+                    return json.dumps(res, default=str, indent=2)
+                except Exception as e:
+                    log.error("python_module_tool_failed", tool_name=spec.name, error=str(e))
+                    return f"Python execution error: {e}"
+            elif code:
+                try:
+                    local_vars = {"params": all_params, "result": None}
+                    exec(code, {}, local_vars)
+                    res = local_vars.get("result")
+                    if isinstance(res, str):
+                        return res
+                    return json.dumps(res, default=str, indent=2)
+                except Exception as e:
+                    log.error("python_code_tool_failed", tool_name=spec.name, error=str(e))
+                    return f"Python execution error: {e}"
             else:
-                return f"HTTP {resp.status_code}: {resp.text[:200]}"
-        except requests.RequestException as e:
-            return f"Request failed: {e}"
+                return "Error: Python module/function or code not configured for this tool."
+
+        # 3. Default HTTP Connector
+        else:
+            pool = _get_pool()
+            try:
+                with pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT c.base_url, c.default_headers, c.brand_id
+                            FROM brand_api_config c
+                            JOIN registered_api_endpoints e ON e.brand_api_config_id = c.id
+                            WHERE e.name = %(name)s AND e.is_active = true AND c.is_active = true
+                            LIMIT 1
+                        """, {"name": spec.name})
+
+                        row = cur.fetchone()
+                        if not row:
+                            return f"Error: brand API config not found for {spec.name}"
+                        base_url, default_headers_raw, brand_id_for_url = row
+                        headers = json.loads(default_headers_raw) if default_headers_raw else {}
+            except Exception as e:
+                return f"Error connecting to database: {e}"
+
+            all_params = {}
+            if kwargs:
+                all_params.update(kwargs)
+            all_params.update(kw)
+
+            if spec.requires_auth:
+                cred = _get_credential_for_spec(spec.name)
+                if cred:
+                    if cred["type"] == "bearer":
+                        headers["Authorization"] = f"Bearer {cred['value']}"
+                    elif cred["type"] == "api_key":
+                        headers["X-API-Key"] = cred["value"]
+                    elif cred["type"] == "basic":
+                        import base64
+                        encoded = base64.b64encode(f"{cred['username']}:{cred['password']}".encode()).decode()
+                        headers["Authorization"] = f"Basic {encoded}"
+
+            # Build URL — substitute path params, handle brand-prefixed APIs
+            path = spec.path or "/"
+            for k, v in list(all_params.items()):
+                if f"{{{k}}}" in path:
+                    path = path.replace(f"{{{k}}}", str(v))
+                    del all_params[k]
+            if path.startswith("/api/v1/"):
+                path = f"/{brand_id_for_url}{path}"
+            url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+            query_params = {
+                p["name"]: all_params.pop(p["name"])
+                for p in (spec.query_params or [])
+                if p["name"] in all_params
+            }
+
+            body = dict(all_params)
+
+            try:
+                span_name = f"tool.http.{spec.method.lower()}"
+                with get_tracer().start_as_current_span(span_name) as span:
+                    set_span_attributes(
+                        span,
+                        tool_name=spec.name,
+                        http_method=spec.method,
+                        http_url=url,
+                        brand_id=brand_id_for_url,
+                        requires_auth=spec.requires_auth,
+                    )
+                    resp = http_request(
+                        spec.method,
+                        url,
+                        headers=headers,
+                        params=query_params or None,
+                        json_body=body if body and spec.method in ("POST", "PUT", "PATCH") else None,
+                        timeout=15,
+                    )
+                    set_span_attributes(span, http_status_code=resp.status_code)
+                    if not resp.ok:
+                        log.warning(
+                            "tool_http_failed",
+                            tool=spec.name,
+                            status=resp.status_code,
+                            url=url,
+                        )
+                if resp.ok:
+                    try:
+                        return json.dumps(resp.json(), indent=2)
+                    except json.JSONDecodeError:
+                        return resp.text
+                else:
+                    return f"HTTP {resp.status_code}: {resp.text[:200]}"
+            except requests.RequestException as e:
+                return f"Request failed: {e}"
 
     endpoint_name = spec.name  # capture for closure
     _execute_tool.__name__ = safe_name
@@ -175,8 +246,8 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
 
 
 def _get_pool():
-    from config import settings
-    return psycopg.connect(**settings.postgres_conn_params())
+    from core.db.pool import get_sync_pool
+    return get_sync_pool()
 
 
 def _get_credential_for_spec(tool_name: str) -> dict | None:
@@ -192,9 +263,9 @@ def _get_credential_for_spec(tool_name: str) -> dict | None:
         if now_ms - cached_at < _CRED_CACHE_TTL_MS:
             return cached_cred
 
-    conn = _get_pool()
+    pool = _get_pool()
     try:
-        with conn:
+        with pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT cred.key_type, cred.key_name,
@@ -214,8 +285,80 @@ def _get_credential_for_spec(tool_name: str) -> dict | None:
                 cred = {"type": key_type, "name": key_name, "value": value}
                 _CRED_CACHE[tool_name] = (cred, now_ms)
                 return cred
-    finally:
-        conn.close()
+    except Exception as e:
+        log.error("get_credential_failed", tool_name=tool_name, error=str(e))
+        return None
+
+
+# ── Dynamic Tool Schema Generator ───────────────────────────────────────────────
+
+from pydantic import BaseModel, Field, create_model
+
+def _build_args_schema(spec: APIToolSpec, safe_name: str) -> type[BaseModel] | None:
+    """
+    Dynamically build a Pydantic BaseModel representing the parameters
+    that this dynamic tool accepts, supporting both query_params and body_schema.
+    """
+    fields = {}
+
+    # 1. Parse query parameters
+    if spec.query_params:
+        for p in spec.query_params:
+            p_name = p.get("name")
+            if not p_name:
+                continue
+
+            p_type = p.get("type", "string")
+            py_type: type = str
+            if p_type == "integer":
+                py_type = int
+            elif p_type == "number":
+                py_type = float
+            elif p_type == "boolean":
+                py_type = bool
+
+            required = p.get("required", False)
+            default_val = ... if required else None
+            fields[p_name] = (
+                py_type,
+                Field(default=default_val, description=p.get("description", ""))
+            )
+
+    # 2. Parse request body parameters
+    if spec.body_schema and isinstance(spec.body_schema, dict):
+        properties = spec.body_schema.get("properties", {})
+        required_fields = spec.body_schema.get("required", [])
+        if isinstance(properties, dict):
+            for p_name, prop in properties.items():
+                p_type = prop.get("type", "string") if isinstance(prop, dict) else "string"
+                py_type = str
+                if p_type == "integer":
+                    py_type = int
+                elif p_type == "number":
+                    py_type = float
+                elif p_type == "boolean":
+                    py_type = bool
+                elif p_type == "array":
+                    py_type = list
+                elif p_type == "object":
+                    py_type = dict
+
+                required = p_name in required_fields
+                default_val = ... if required else None
+                desc = prop.get("description", "") if isinstance(prop, dict) else ""
+                fields[p_name] = (
+                    py_type,
+                    Field(default=default_val, description=desc)
+                )
+
+    if not fields:
+        return None
+
+    try:
+        return create_model(f"{safe_name}_args", **fields)
+    except Exception as e:
+        log.error("failed_to_build_args_schema", tool_name=spec.name, error=str(e))
+        return None
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -242,11 +385,17 @@ def load_tools_for_brand(brand_id: str, brand_fernet_key: bytes | None = None) -
             continue
 
         func = _build_tool_func(spec)
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", spec.name)
+        args_schema = _build_args_schema(spec, safe_name)
+
         # Re-wrap with @tool (langchain_core.tool decorator)
         try:
-            decorated = tool(func)
-        except Exception:
-            # If @tool fails (e.g. args don't match), use raw func
+            if args_schema:
+                decorated = tool(func, args_schema=args_schema)
+            else:
+                decorated = tool(func)
+        except Exception as e:
+            log.warning("tool_decoration_failed", tool_name=spec.name, error=str(e))
             decorated = func
 
         _TOOL_REGISTRY[cache_key] = decorated

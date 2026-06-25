@@ -183,10 +183,12 @@ function app() {
     // ════════════════════════════════════════════════════════════════
     async init() {
       this.applyTheme();
+      this.syncFromUrl();
       await this.loadBrands();
       await this.checkHealth();
       this.refreshMonitoring();
       setInterval(() => this.refreshMonitoring(), 15000);
+      window.addEventListener('popstate', () => this.syncFromUrl());
     },
 
     applyTheme() {
@@ -197,6 +199,24 @@ function app() {
       this.theme = this.theme === 'light' ? 'dark' : 'light';
       localStorage.setItem('theme', this.theme);
       this.applyTheme();
+    },
+
+    // ── Tab routing ──────────────────────────────────────────────
+    switchTab(tabId) {
+      this.activeTab = tabId;
+      const base = window.location.pathname.split('/').filter(Boolean).slice(0, 2).join('/');
+      const url = '/' + (tabId === 'demo' ? base : base + '/' + tabId);
+      history.pushState({}, '', url);
+    },
+
+    syncFromUrl() {
+      const parts = window.location.pathname.split('/').filter(Boolean);
+      const tab = parts[2];
+      if (tab && this.navTabs.find(t => t.id === tab)) {
+        this.activeTab = tab;
+      } else {
+        this.activeTab = 'demo';
+      }
     },
 
     // ════════════════════════════════════════════════════════════════
@@ -652,7 +672,7 @@ function app() {
 
     async runMigration(dryRun = true) {
       try {
-        this.migrationResult = await this.api('/admin/ontology/migrate-nodes?dry_run=' + dryRun);
+        this.migrationResult = await this.api('/admin/ontology/migrate-nodes?dry_run=' + dryRun, { method: 'POST' });
         this.toast(dryRun ? 'Dry run complete' : 'Migration applied', 'toast-success');
       } catch (e) { this.toast('Migration failed: ' + e.message, 'toast-error'); }
     },

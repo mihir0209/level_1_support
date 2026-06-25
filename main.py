@@ -78,6 +78,11 @@ async def lifespan(app: FastAPI):
     tracer = get_tracer()
     log.info("startup", environment=settings.environment, otel_service="l1_support")
 
+    # Initialize PostgreSQL connection pools
+    from core.db.pool import init_pools, open_async_pool
+    init_pools()
+    await open_async_pool()
+
     # Restore dynamically registered brands from Redis
     try:
         import json as _j
@@ -146,6 +151,13 @@ async def lifespan(app: FastAPI):
     try:
         from feedback.consumer import stop_consumer
         stop_consumer()
+    except Exception:
+        pass
+
+    # Close PostgreSQL connection pools
+    try:
+        from core.db.pool import close_pools
+        await close_pools()
     except Exception:
         pass
 
@@ -671,9 +683,10 @@ async def chatwoot_webhook(request: Request):
         return {"status": "skipped"}
 
     # Resolve brand from inbox_id via registry
-    from brands.registry import get_brand_by_chatwoot_inbox
+    from brands.registry import get_brand_by_chatwoot_inbox, BRAND_REGISTRY
     brand_entry = get_brand_by_chatwoot_inbox(inbox_id) if inbox_id else None
-    brand_id = brand_entry.brand_id if brand_entry else "boohoo_uk"
+    default_brand = BRAND_REGISTRY[0].brand_id if BRAND_REGISTRY else "boohoo_uk"
+    brand_id = brand_entry.brand_id if brand_entry else default_brand
 
     # Check if session exists for this Chatwoot conversation
     session_key = f"chatwoot:{chatwoot_conv_id}"
@@ -737,15 +750,11 @@ async def ready():
         checks["redis"] = f"error: {e}"
         all_ok = False
 
-    # Postgres (via psycopg)
+    # Postgres (via psycopg pool)
     try:
-        import psycopg
-        conn_str = (
-            f"host={settings.postgres_host} port={settings.postgres_port} "
-            f"dbname={settings.postgres_db} user={settings.postgres_user} "
-            f"password={settings.postgres_password}"
-        )
-        async with await psycopg.AsyncConnection.connect(conn_str) as conn:
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        async with pool.connection() as conn:
             await conn.execute("SELECT 1")
         checks["postgres"] = "ok"
     except Exception as e:
@@ -843,7 +852,7 @@ async def graph_query(q: Annotated[str, Field(min_length=1, max_length=2000)]):
     """Raw Cypher query against the knowledge graph. Example: `MATCH (n:Brand) RETURN n LIMIT 5`"""
     try:
         _, graph = get_graph_client()
-        result = graph.query(q)
+        result = graph.ro_query(q)
         return {"rows": [list(r) for r in result.result_set], "columns": result.header}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -1088,13 +1097,9 @@ async def kb_chunks(brand_id: Annotated[str | None, Query(max_length=64)] = None
     if not settings.postgres_host:
         return {"count": 0, "chunks": [], "note": "Postgres not configured"}
     try:
-        import psycopg
-        conn_str = (
-            f"host={settings.postgres_host} port={settings.postgres_port} "
-            f"dbname={settings.postgres_db} user={settings.postgres_user} "
-            f"password={settings.postgres_password}"
-        )
-        async with await psycopg.AsyncConnection.connect(conn_str) as conn:
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        async with pool.connection() as conn:
             params: list = []
             q = "SELECT id, brand_id, chunk_type, source_url, left(content,200), metadata FROM knowledge_chunks WHERE 1=1"
             if brand_id:
@@ -1364,13 +1369,9 @@ async def system_overview():
     pg_stats = {}
     if settings.postgres_host:
         try:
-            import psycopg
-            conn_str = (
-                f"host={settings.postgres_host} port={settings.postgres_port} "
-                f"dbname={settings.postgres_db} user={settings.postgres_user} "
-                f"password={settings.postgres_password}"
-            )
-            async with await psycopg.AsyncConnection.connect(conn_str) as conn:
+            from core.db.pool import get_async_pool
+            pool = get_async_pool()
+            async with pool.connection() as conn:
                 rows = await (await conn.execute(
                     "SELECT brand_id, count(*) FROM knowledge_chunks GROUP BY brand_id"
                 )).fetchall()
@@ -1922,7 +1923,9 @@ async def voice_incoming(request: Request):
 
     # Resolve brand from the Twilio number being called
     # Phase 2: map TWILIO_PHONE_NUMBER → brand via config
-    brand_id = "boohoo_uk"  # default; extend via per-number config
+    from brands.registry import BRAND_REGISTRY
+    default_brand = BRAND_REGISTRY[0].brand_id if BRAND_REGISTRY else "boohoo_uk"
+    brand_id = default_brand  # default fallback
 
     from channels.voice.router import handle_incoming_call
     twiml = await handle_incoming_call(

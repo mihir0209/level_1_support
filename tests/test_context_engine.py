@@ -174,7 +174,7 @@ async def test_classify_intent_wismo():
 
     assert result.issue_type == "wismo"
     assert result.confidence >= 0.9
-    assert result.entities.get("order_id") == "BH-12345"
+    assert result.entities.order_id == "BH-12345"
 
 
 @pytest.mark.asyncio

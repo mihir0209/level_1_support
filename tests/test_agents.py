@@ -120,3 +120,25 @@ class TestSimpleAgent:
         _inject_dynamic_tools(agent, [shipment_track])
         assert len(agent.tools) == initial_count + 1
         assert shipment_track in agent.tools
+
+    def test_dynamic_telecom_agent_generation(self, monkeypatch):
+        """Verify we can dynamically build a telecom agent with custom domain configs."""
+        from brands.registry import BrandEntry
+        from core.agents.specialists import get_agent_for_intent
+
+        # Temporarily register a telecom brand in registry
+        tel_brand = BrandEntry(
+            brand_id="test_telco",
+            name="TestTelco",
+            domains=["testtelco.com"],
+            locales=["en-US"],
+            default_region="USA",
+            domain="telecom",
+        )
+        monkeypatch.setattr("brands.registry._by_id", {"test_telco": tel_brand})
+
+        agent = get_agent_for_intent("network_outage", brand_id="test_telco")
+        assert agent.name == "Network-Agent"
+        assert agent.description == "Handles network outages and speed issues"
+        # Escalation tool is automatically appended
+        assert any(t.name == "escalate" for t in agent.tools)

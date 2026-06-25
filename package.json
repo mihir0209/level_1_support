@@ -1,0 +1,14 @@
+{
+  "name": "l1-support-ai",
+  "private": true,
+  "scripts": {
+    "build:css": "tailwindcss -i ./static/admin/css/tailwind.css -o ./static/admin/css/main.css --minify",
+    "build:css:dev": "tailwindcss -i ./static/admin/css/tailwind.css -o ./static/admin/css/main.css",
+    "watch:css": "tailwindcss -i ./static/admin/css/tailwind.css -o ./static/admin/css/main.css --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.0",
+    "autoprefixer": "^10.4.0",
+    "postcss": "^8.4.0"
+  }
+}

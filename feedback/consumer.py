@@ -29,9 +29,9 @@ _POLL_INTERVAL_SECONDS = 300  # 5 minutes
 
 
 def _get_db_conn():
-    """Open a Postgres connection using settings.postgres_conn_params()."""
-    import psycopg
-    return psycopg.connect(**settings.postgres_conn_params())
+    """Get connection from global sync pool using ConnectionProxy."""
+    from core.db.pool import get_sync_pool, ConnectionProxy
+    return ConnectionProxy(get_sync_pool())
 
 
 def _aggregate_intent_patterns() -> list[dict[str, Any]]:

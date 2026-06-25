@@ -907,9 +907,15 @@ function app() {
 
     async api(path, opts = {}) {
       const base = window.location.origin;
+      const method = opts.method || 'GET';
+      const headers = { ...(opts.headers || {}) };
+      if (method !== 'GET' && !headers['Content-Type']) {
+        headers['Content-Type'] = 'application/json';
+      }
       const res = await fetch(base + path, {
-        headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
-        ...opts,
+        method,
+        headers,
+        body: opts.body,
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));

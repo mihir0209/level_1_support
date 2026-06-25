@@ -178,6 +178,8 @@ class RegisteredApiEndpoint(Base):
     requires_auth: Mapped[bool] = mapped_column(Boolean, default=False)
     tags: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    connector_type: Mapped[str] = mapped_column(String(32), default="http", nullable=False)
+    connector_config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow

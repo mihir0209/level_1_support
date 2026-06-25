@@ -1,0 +1,235 @@
+# E-commerce domain config — L1 Support taxonomy, tools, and specialist mapping.
+#
+# This replaces all hardcoded e-commerce strings in the codebase with
+# data-driven configuration. Adding a new e-commerce brand requires only
+# adding it to brands/registry.py — no code changes needed.
+#
+# The domain_id ("ecommerce") is used throughout the system as the key
+# for taxonomy resolution, tool manifests, and specialist routing.
+
+domain_id: ecommerce
+domain_name: "Fashion E-Commerce"
+description: "Multi-brand fashion retail support — Boohoo Group and similar e-commerce platforms."
+
+# ── Base taxonomy category mapping ──────────────────────────────────────────
+# Maps e-commerce IssueType slugs to the base SupportCategory.
+# Base categories are defined in core/taxonomy/base.py and are industry-agnostic.
+
+category_mapping:
+  wismo:           service_status
+  delivery_query:  service_status
+  order_cancel:    service_status
+  return_initiate: billing
+  refund_delay:    billing
+  payment_failed:  billing
+  promo_not_applied: billing
+  klarna_return:   billing
+  afterpay_return: billing
+  wrong_item:      fault
+  damaged_item:    fault
+  account_locked:  account
+  size_query:      information
+  info:            information
+  unknown:         information
+
+# ── IssueType definitions ─────────────────────────────────────────────────────
+# Each IssueType maps to a SupportCategory and has an associated specialist.
+
+issue_types:
+  wismo:
+    name: "Where Is My Order?"
+    description: "Customer asking about order location, tracking, or delivery status."
+    category: service_status
+    avg_resolution_time_seconds: 90
+    specialist: wismo_agent
+
+  delivery_query:
+    name: "Delivery Information"
+    description: "Customer asking about delivery options, times, or regions."
+    category: service_status
+    avg_resolution_time_seconds: 60
+    specialist: info_agent
+
+  return_initiate:
+    name: "Initiate Return"
+    description: "Customer wants to start a return for one or more items."
+    category: billing
+    avg_resolution_time_seconds: 120
+    specialist: returns_agent
+
+  refund_delay:
+    name: "Refund Not Received"
+    description: "Customer chasing a refund that has not appeared yet."
+    category: billing
+    avg_resolution_time_seconds: 150
+    specialist: refund_agent
+
+  wrong_item:
+    name: "Wrong Item Received"
+    description: "Customer received an item different from what they ordered."
+    category: fault
+    avg_resolution_time_seconds: 180
+    specialist: wrong_item_agent
+
+  damaged_item:
+    name: "Damaged or Faulty Item"
+    description: "Customer received an item that is damaged, faulty, or defective."
+    category: fault
+    avg_resolution_time_seconds: 180
+    specialist: wrong_item_agent
+
+  order_cancel:
+    name: "Cancel an Order"
+    description: "Customer wants to cancel an order they just placed."
+    category: service_status
+    avg_resolution_time_seconds: 60
+    specialist: wismo_agent
+
+  payment_failed:
+    name: "Payment Declined"
+    description: "Customer's payment was declined or not processed correctly."
+    category: billing
+    avg_resolution_time_seconds: 120
+    specialist: payment_agent
+
+  promo_not_applied:
+    name: "Discount Code Not Working"
+    description: "Customer's promotional or discount code is not applying at checkout."
+    category: billing
+    avg_resolution_time_seconds: 90
+    specialist: promos_agent
+
+  klarna_return:
+    name: "Klarna Return & Refund"
+    description: "Customer using Klarna BNPL asking about return/refund flow."
+    category: billing
+    avg_resolution_time_seconds: 150
+    specialist: refund_agent
+
+  afterpay_return:
+    name: "Afterpay Return & Refund"
+    description: "Customer using Afterpay/Clearpay asking about return/refund flow."
+    category: billing
+    avg_resolution_time_seconds: 150
+    specialist: refund_agent
+
+  size_query:
+    name: "Size Guide Query"
+    description: "Customer asking about sizing, fit, or which size to order."
+    category: information
+    avg_resolution_time_seconds: 60
+    specialist: product_agent
+
+  account_locked:
+    name: "Cannot Log In"
+    description: "Customer cannot access their account (forgotten password, locked account)."
+    category: account
+    avg_resolution_time_seconds: 90
+    specialist: account_agent
+
+  info:
+    name: "General Information"
+    description: "Customer asking a general FAQ or policy question."
+    category: information
+    avg_resolution_time_seconds: 60
+    specialist: info_agent
+
+# ── Tool manifest per IssueType ────────────────────────────────────────────────
+# Defines which tools are available to the LLM for each IssueType.
+# Tools are defined in core/tools/registry.py (static) or loaded dynamically.
+
+tool_manifest:
+  wismo:            [order_lookup, shipment_track]
+  delivery_query:    [policy_lookup, shipment_track]
+  return_initiate:  [policy_lookup, return_init, email_label]
+  refund_delay:     [refund_status, payment_lookup, escalate]
+  wrong_item:       [order_lookup, catalog_lookup, return_init, refund_initiate]
+  damaged_item:     [order_lookup, return_init, refund_initiate]
+  order_cancel:     [order_lookup, cancel_order]
+  payment_failed:   [payment_lookup]
+  promo_not_applied: [promo_validate, escalate]
+  klarna_return:    [policy_lookup, return_init]
+  afterpay_return:   [policy_lookup, return_init]
+  size_query:       [size_guide, catalog_lookup]
+  account_locked:   [account_status, escalate]
+  info:             [faq_search, policy_search]
+  unknown:          [escalate]
+
+# ── Specialist agent routing ──────────────────────────────────────────────────
+# Maps specialist agent IDs to their implementation factories.
+# New specialist agents are registered here — no code changes needed per brand.
+
+specialist_agents:
+  wismo_agent:
+    name: "WISMO-Agent"
+    description: "Tracks orders and resolves delivery queries"
+
+  returns_agent:
+    name: "Returns-Agent"
+    description: "Initiates returns and sends prepaid labels"
+
+  refund_agent:
+    name: "Refund-Agent"
+    description: "Checks refund status and resolves delays"
+
+  wrong_item_agent:
+    name: "WrongItem-Agent"
+    description: "Resolves wrong/damaged/missing item complaints"
+
+  payment_agent:
+    name: "Payment-Agent"
+    description: "Resolves payment failures and billing queries"
+
+  promos_agent:
+    name: "Promos-Agent"
+    description: "Validates promo codes and resolves discount issues"
+
+  account_agent:
+    name: "Account-Agent"
+    description: "Manages account access, locks, and profile issues"
+
+  product_agent:
+    name: "Product-Agent"
+    description: "Answers sizing, product availability, and catalog queries"
+
+  info_agent:
+    name: "Info-Agent"
+    description: "Answers FAQs and policy questions"
+
+  escalation_agent:
+    name: "Escalation-Agent"
+    description: "Creates L2 tickets and manages human handoff"
+
+# ── Brand tier rules ──────────────────────────────────────────────────────────
+# Tier display names and return policy defaults per tier.
+# Actual return policies come from the KG; these are fallback display names.
+
+brand_tiers:
+  premium:
+    display_name: "Premium"
+    return_cost_gbp: 0.0
+    return_cost_usd: 0.0
+    return_window_days: 28
+
+  mid:
+    display_name: "Mid-market"
+    return_cost_gbp: 1.99
+    return_cost_usd: 6.00
+    return_window_days: 28
+
+  budget:
+    display_name: "Budget"
+    return_cost_gbp: 1.99
+    return_cost_usd: 6.00
+    return_window_days: 14   # sale items
+
+# ── Excluded item categories ───────────────────────────────────────────────────
+# Categories that are non-returnable across all e-commerce brands.
+# Brand-specific exclusions come from the KG ReturnPolicy node.
+
+excluded_item_categories:
+  - swimwear
+  - underwear
+  - lingerie
+  - pierced jewellery
+  - beauty products

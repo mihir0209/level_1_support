@@ -31,20 +31,17 @@ def upgrade() -> None:
         sa.Column("source_url", sa.Text, nullable=True),
         sa.Column("content", sa.Text, nullable=False),
         sa.Column("chunk_type", sa.String(32), nullable=True),
-        sa.Column("embedding", sa.Text, nullable=True),  # pgvector stored as text
+        sa.Column("embedding", sa.Text, nullable=True),  # text representation only — no pgvector index
         sa.Column("confidence", sa.Float, nullable=True),
         sa.Column("metadata", postgresql.JSONB, default={}),
         sa.Column("crawled_at", sa.DateTime(timezone=True), default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), default=sa.func.now(), onupdate=sa.func.now()),
     )
-    op.create_index("ix_knowledge_chunks_brand_id", "knowledge_chunks", ["brand_id"])
-    op.create_index(
-        "ix_knowledge_chunks_embedding", "knowledge_chunks", ["embedding"],
-        postgresql_using="ivfflat", postgresql_with={"lists": 100}
-    )
+    op.create_index("ix_knowledge_chunks_brand_id", "knowledge_chunks", ["brand_id"], if_not_exists=True)
+    # embedding stored as text — no vector index needed
     op.create_index(
         "ix_knowledge_chunks_meta", "knowledge_chunks", ["metadata"],
-        postgresql_using="gin"
+        postgresql_using="gin", if_not_exists=True
     )
 
     # ── support_sessions ───────────────────────────────────────────────────────
@@ -63,9 +60,9 @@ def upgrade() -> None:
         sa.Column("ended_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("metadata", postgresql.JSONB, default={}),
     )
-    op.create_index("ix_support_sessions_brand_intent", "support_sessions", ["brand_id", "intent"])
-    op.create_index("ix_support_sessions_customer", "support_sessions", ["customer_id"])
-    op.create_index("ix_support_sessions_outcome", "support_sessions", ["outcome"])
+    op.create_index("ix_support_sessions_brand_intent", "support_sessions", ["brand_id", "intent"], if_not_exists=True)
+    op.create_index("ix_support_sessions_customer", "support_sessions", ["customer_id"], if_not_exists=True)
+    op.create_index("ix_support_sessions_outcome", "support_sessions", ["outcome"], if_not_exists=True)
 
     # ── intent_label_queue ──────────────────────────────────────────────────────
     op.create_table(
@@ -104,7 +101,7 @@ def upgrade() -> None:
         sa.Column("is_active", sa.Boolean, default=True),
         sa.Column("created_at", sa.DateTime(timezone=True), default=sa.func.now()),
     )
-    op.create_index("ix_crawl_sources_brand", "crawl_sources", ["brand_id"])
+    op.create_index("ix_crawl_sources_brand", "crawl_sources", ["brand_id"], if_not_exists=True)
 
     # ── brand_api_config ────────────────────────────────────────────────────────
     op.create_table(
@@ -140,7 +137,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), default=sa.func.now(), onupdate=sa.func.now()),
         sa.UniqueConstraint("brand_api_config_id", "name", name="uq_endpoint_config_name"),
     )
-    op.create_index("ix_endpoints_config_active", "registered_api_endpoints", ["brand_api_config_id", "is_active"])
+    op.create_index("ix_endpoints_config_active", "registered_api_endpoints", ["brand_api_config_id", "is_active"], if_not_exists=True)
 
     # ── brand_api_credentials ───────────────────────────────────────────────────
     op.create_table(
@@ -157,7 +154,7 @@ def upgrade() -> None:
         sa.Column("is_active", sa.Boolean, default=True),
         sa.UniqueConstraint("brand_api_config_id", "key_type", name="uq_cred_config_type"),
     )
-    op.create_index("ix_credentials_config", "brand_api_credentials", ["brand_api_config_id"])
+    op.create_index("ix_credentials_config", "brand_api_credentials", ["brand_api_config_id"], if_not_exists=True)
 
 
 def downgrade() -> None:

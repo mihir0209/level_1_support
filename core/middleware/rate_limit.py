@@ -55,10 +55,13 @@ async def check_rate_limit(
         now = time.time()
         window_start = now - window_seconds
 
+        import uuid
+        member = f"{now}:{uuid.uuid4().hex[:6]}"
+
         pipe = r.pipeline()
         pipe.zremrangebyscore(key, 0, window_start)
         pipe.zcard(key)
-        pipe.zadd(key, {str(now): now})
+        pipe.zadd(key, {member: now})
         pipe.expire(key, window_seconds + 1)
         results = await pipe.execute()
 
@@ -98,14 +101,22 @@ async def rate_limit_middleware(request: Request, call_next: Callable):
     allowed, remaining, reset_in = await check_rate_limit(path, client_id, default_limit)
 
     if not allowed:
-        raise HTTPException(
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
             status_code=429,
-            detail={
-                "error": "Rate limit exceeded",
-                "limit": default_limit,
-                "window_seconds": 60,
-                "retry_after": reset_in,
+            content={
+                "detail": {
+                    "error": "Rate limit exceeded",
+                    "limit": default_limit,
+                    "window_seconds": 60,
+                    "retry_after": reset_in,
+                }
             },
+            headers={
+                "X-RateLimit-Limit": str(default_limit),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": str(int(time.time() + reset_in)),
+            }
         )
 
     response = await call_next(request)

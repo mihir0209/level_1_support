@@ -33,14 +33,14 @@ _STOP_WORDS = {
 
 # Map intent category → most-relevant collected node labels to search first
 _CATEGORY_LABELS: dict[str, list[str]] = {
-    "delivery":   ["DeliveryOption", "FAQ", "KnowledgeItem"],
-    "return":     ["ReturnPolicy", "ReturnMethod", "ReturnEligibility", "FAQ", "Policy"],
-    "product":    ["SizeGuide", "ProductCategory", "FAQ", "KnowledgeItem"],
-    "order":      ["FAQ", "KnowledgeItem", "DeliveryOption"],
-    "payment":    ["FAQ", "KnowledgeItem"],
-    "account":    ["FAQ", "KnowledgeItem"],
-    "promotions": ["FAQ", "KnowledgeItem"],
-    "unknown":    ["FAQ", "KnowledgeItem", "DeliveryOption", "Policy"],
+    "delivery":   ["DeliveryOption", "FAQ", "KnowledgeItem", "Policy", "Entity"],
+    "return":     ["ReturnPolicy", "ReturnMethod", "ReturnEligibility", "FAQ", "Policy", "Entity"],
+    "product":    ["SizeGuide", "ProductCategory", "FAQ", "KnowledgeItem", "Entity"],
+    "order":      ["FAQ", "KnowledgeItem", "DeliveryOption", "Entity"],
+    "payment":    ["FAQ", "KnowledgeItem", "Policy", "Entity"],
+    "account":    ["FAQ", "KnowledgeItem", "Entity"],
+    "promotions": ["FAQ", "KnowledgeItem", "Entity"],
+    "unknown":    ["FAQ", "KnowledgeItem", "DeliveryOption", "Policy", "Entity"],
 }
 
 
@@ -116,8 +116,9 @@ def get_return_policy(
     as_of = (order_placed_at or datetime.now(timezone.utc)).isoformat()
     result = graph.query(
         """
-        MATCH (b:Brand {id: $brand_id})-[hp:HAS_POLICY {type: 'return'}]->(p:ReturnPolicy)
-        WHERE hp.effectiveDate <= $as_of
+        MATCH (b:Brand {id: $brand_id})-[hp:HAS_POLICY {type: 'return'}]->(p)
+        WHERE (p:ReturnPolicy OR p:Policy)
+        AND hp.effectiveDate <= $as_of
         AND (p.expiry_date IS NULL OR p.expiry_date > $as_of)
         RETURN p.return_window_days AS window_days,
                p.return_cost_gbp AS cost_gbp,
@@ -162,8 +163,9 @@ def get_shipping_policy(
     as_of = (order_placed_at or datetime.now(timezone.utc)).isoformat()
     result = graph.query(
         """
-        MATCH (b:Brand {id: $brand_id})-[hp:HAS_POLICY {type: 'shipping', region: $region}]->(p:ShippingPolicy)
-        WHERE hp.effectiveDate <= $as_of
+        MATCH (b:Brand {id: $brand_id})-[hp:HAS_POLICY {type: 'shipping', region: $region}]->(p)
+        WHERE (p:ShippingPolicy OR p:Policy)
+        AND hp.effectiveDate <= $as_of
         AND (p.expiry_date IS NULL OR p.expiry_date > $as_of)
         RETURN p.standard_days_min, p.standard_days_max, p.standard_cost,
                p.express_available, p.express_days_max, p.express_cost,
@@ -327,12 +329,12 @@ RETURN r.name, r.steps
 GRAPH_SCHEMA_SUMMARY = """
 Nodes: Brand, ReturnPolicy, ShippingPolicy, IssueType, Resolution,
        FAQ, KnowledgeItem, DeliveryOption, SizeGuide, Policy, ProductCategory,
-       ReturnMethod, ReturnEligibility, ContactMethod, Review
+       ReturnMethod, ReturnEligibility, ContactMethod, Review, Entity
 Key relationships:
-  (Brand)-[:HAS_POLICY {type, effectiveDate, region?}]->(ReturnPolicy|ShippingPolicy)
+  (Brand)-[:HAS_POLICY {type, effectiveDate, region?}]->(ReturnPolicy|ShippingPolicy|Policy)
   (IssueType)-[:RESOLVED_BY {priority}]->(Resolution)
   (Brand)-[:HAS_FAQ]->(FAQ)            FAQ has: question, answer, category
-  (Brand)-[:HAS_KNOWLEDGE]->(KnowledgeItem|DeliveryOption|SizeGuide|ContactMethod)
+  (Brand)-[:HAS_KNOWLEDGE]->(KnowledgeItem|DeliveryOption|SizeGuide|ContactMethod|Entity)
   (Brand)-[:HAS_POLICY]->(Policy)      Policy has: policy_type, title, content
   (Brand)-[:HAS_REVIEW]->(Review)
   (Brand)-[:SELLS]->(ProductCategory)

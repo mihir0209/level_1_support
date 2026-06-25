@@ -32,9 +32,9 @@ CSAT_DISSATISFIED_THRESHOLD = settings.csat_dissatisfied_threshold
 
 
 def _get_db_conn():
-    """Open a Postgres connection using settings.postgres_conn_params()."""
-    import psycopg
-    return psycopg.connect(**settings.postgres_conn_params())
+    """Get connection from global sync pool using ConnectionProxy."""
+    from core.db.pool import get_sync_pool, ConnectionProxy
+    return ConnectionProxy(get_sync_pool())
 
 
 def _queue_intent_review(brand_id: str, intent: str, confidence: float) -> None:

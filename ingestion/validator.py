@@ -136,7 +136,8 @@ def _validate_faq(
     item_data = {
         "question": faq.question,
         "answer": faq.answer,
-        "intent_tags": [t for t in faq.intent_tags if t in _VALID_INTENT_TAGS],
+        "intent_tags": faq.intent_tags,
+        "suggested_categories": faq.suggested_categories,
     }
     content_hash = _hash_content(item_data)
 

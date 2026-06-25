@@ -1,0 +1,38 @@
+/* Tailwind entry point — built by: npm run build:css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Brand dots ─────────────────────────────────────────────────────────── */
+.brand-dot {
+  width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+}
+.brand-boohoo_uk    { --b: hsl(270, 70%, 55%); }
+.brand-plt_uk       { --b: hsl(330, 70%, 55%); }
+.brand-karenmillen_uk { --b: hsl(200, 65%, 50%); }
+.brand-nastygal_us  { --b: hsl(350, 70%, 50%); }
+.brand-dot { background: var(--b, hsl(260, 70%, 55%)); }
+
+/* ── Status pills ──────────────────────────────────────────────────────── */
+.status-resolved    { background: #dcfce7; color: #166534; }
+.status-escalated  { background: #fee2e2; color: #991b1b; }
+.status-active     { background: #dbeafe; color: #1e40af; }
+.status-processing { background: #fef9c3; color: #854d0e; }
+
+/* ── Chat bubbles ───────────────────────────────────────────────────────── */
+.msg-user .bubble  { background: #7c3aed; color: #fff; border-radius: 18px 18px 4px 18px; }
+.msg-agent .bubble { background: #1e293b; color: #fff; border-radius: 18px 18px 18px 4px; }
+.msg-system .bubble { background: #fef3c7; color: #92400e; border-radius: 8px; }
+
+/* ── Animations ────────────────────────────────────────────────────────── */
+.slide-enter { animation: slideIn 0.2s ease-out; }
+@keyframes slideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+.metric-card { transition: transform 0.15s, box-shadow 0.15s; }
+.metric-card:hover { transform: translateY(-2px); box-shadow: 0 8px 25px -5px rgba(0,0,0,0.1); }
+
+/* ── Scrollbar ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+.dark ::-webkit-scrollbar-thumb { background: #475569; }
