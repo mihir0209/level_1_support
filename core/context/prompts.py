@@ -319,6 +319,60 @@ _SPECIALIST_GENERATORS: dict[str, callable] = {
 }
 
 
+class SafeDict(dict):
+    def __missing__(self, key):
+        return f"{{{key}}}"
+
+
+def safe_format(template: str, context: dict[str, Any]) -> str:
+    """Format a template string safely without raising errors for missing keys or literal brackets."""
+    try:
+        return template.format_map(SafeDict(context))
+    except Exception:
+        # Fallback to simple replace if format_map fails
+        for k, v in context.items():
+            template = template.replace(f"{{{k}}}", str(v))
+        return template
+
+
+def _get_prompt_format_context(brand_id: str) -> dict[str, Any]:
+    """Retrieve all brand-specific policy and shipping variables for prompt formatting."""
+    # Brand details
+    brand_info = get_brand_info(brand_id)
+    brand_name = brand_info.get("name", brand_id) if brand_info else brand_id
+
+    # Return policy details
+    policy = get_return_policy(brand_id)
+    if policy:
+        window = policy.get("return_window_days", 28)
+        cost_gbp = policy.get("return_cost_gbp", 1.99)
+        free_condition = policy.get("free_return_condition") or "Not available"
+        excluded = policy.get("excluded_categories", [])
+    else:
+        window, cost_gbp, free_condition, excluded = 28, 1.99, "Not available", []
+
+    excluded_str = ", ".join(excluded) if excluded else "None"
+    cost_str = "Free" if cost_gbp == 0 else f"£{cost_gbp:.2f}"
+
+    # Shipping details
+    shipping = get_shipping_policy(brand_id)
+    if shipping:
+        s_min = shipping.get("standard_days_min", "?")
+        s_max = shipping.get("standard_days_max", "?")
+    else:
+        s_min, s_max = "?", "?"
+
+    return {
+        "brand_name": brand_name,
+        "window": window,
+        "cost_str": cost_str,
+        "free_condition": free_condition,
+        "excluded_str": excluded_str,
+        "s_min": s_min,
+        "s_max": s_max,
+    }
+
+
 def generate_specialist_prompt(
     agent_id: str,
     brand_id: str,
@@ -333,7 +387,8 @@ def generate_specialist_prompt(
     cfg = get_domain_config(domain)
     spec = cfg.specialist_agents.get(agent_id)
     if spec and spec.system_prompt_template:
-        return spec.system_prompt_template
+        fmt_ctx = _get_prompt_format_context(brand_id)
+        return safe_format(spec.system_prompt_template, fmt_ctx)
 
     generator = _SPECIALIST_GENERATORS.get(agent_id)
     if generator:
