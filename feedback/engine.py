@@ -37,7 +37,7 @@ def _get_db_conn():
     return ConnectionProxy(get_sync_pool())
 
 
-def _queue_intent_review(brand_id: str, intent: str, confidence: float) -> None:
+def _queue_intent_review(brand_id: str, raw_message: str, intent: str, confidence: float) -> None:
     """Add a low-confidence intent classification to the review queue."""
     conn = None
     try:
@@ -47,8 +47,8 @@ def _queue_intent_review(brand_id: str, intent: str, confidence: float) -> None:
                 cur.execute("""
                     INSERT INTO intent_label_queue (brand_id, raw_message, suggested_label)
                     VALUES (%s, %s, %s)
-                """, (brand_id, intent, intent))
-        log.debug("intent_queued_for_review", brand_id=brand_id, intent=intent, confidence=confidence)
+                """, (brand_id, raw_message, intent))
+        log.debug("intent_queued_for_review", brand_id=brand_id, raw_message=raw_message, intent=intent, confidence=confidence)
     except Exception as e:
         log.warning("intent_queue_failed", brand_id=brand_id, error=str(e))
     finally:
@@ -103,7 +103,15 @@ def on_session_close(
 
     # 2. Queue low-confidence intent classifications for human review
     if confidence < LOW_CONFIDENCE_THRESHOLD:
-        _queue_intent_review(brand_id, intent, confidence)
+        raw_message = intent
+        if conversation and "messages" in conversation:
+            for msg in conversation["messages"]:
+                msg_type = msg.get("type") or msg.get("role", "")
+                # Find the first human / user query content
+                if msg_type in ("human", "user") or (not msg_type and msg.get("content")):
+                    raw_message = msg.get("content", intent)
+                    break
+        _queue_intent_review(brand_id, raw_message, intent, confidence)
 
     # 3. Queue failed resolutions for review
     if outcome == "escalated" and resolution_id:
@@ -246,9 +254,10 @@ def get_review_queue_stats(brand_id: str | None = None) -> dict[str, Any]:
 
 
 def approve_intent_label(queue_id: str, approved_label: str) -> bool:
-    """Mark an intent label as reviewed and approved."""
+    """Mark an intent label as reviewed and approved, and update FalkorDB IssueType examples."""
     try:
         import uuid
+        raw_phrase = None
         conn = _get_db_conn()
         with conn:
             with conn.cursor() as cur:
@@ -256,9 +265,30 @@ def approve_intent_label(queue_id: str, approved_label: str) -> bool:
                     UPDATE intent_label_queue
                     SET reviewed = true, approved_label = %s
                     WHERE id = %s
+                    RETURNING raw_message
                 """, (approved_label, uuid.UUID(queue_id)))
+                row = cur.fetchone()
+                if row:
+                    raw_phrase = row[0]
         conn.close()
         log.info("intent_label_approved", queue_id=queue_id, label=approved_label)
+
+        # Update FalkorDB IssueType example_phrases list
+        if raw_phrase:
+            try:
+                from core.ontology.schema import get_graph_client
+                _, graph = get_graph_client()
+                graph.query(
+                    """
+                    MATCH (it:IssueType {id: $approved_label})
+                    SET it.example_phrases = coalesce(it.example_phrases, []) + [$phrase]
+                    """,
+                    {"approved_label": approved_label, "phrase": raw_phrase}
+                )
+                log.info("falkordb_issue_type_examples_updated", approved_label=approved_label, phrase=raw_phrase)
+            except Exception as exc:
+                log.warning("falkordb_example_update_failed", error=str(exc))
+
         return True
     except Exception as e:
         log.warning("intent_approval_failed", queue_id=queue_id, error=str(e))

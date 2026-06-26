@@ -281,6 +281,11 @@ async def run_pipeline(
     async for page in crawl_brand(brand_id, base_url, max_pages=max_pages, concurrency=concurrency):
         report.pages_crawled += 1
         try:
+            from ingestion.change_detector import detect_change_and_update
+            changed = await detect_change_and_update(brand_id, page.url, page.markdown)
+            if not changed:
+                continue
+
             facts = await extract_facts(page)
             report.facts_extracted += facts.total_items
 
