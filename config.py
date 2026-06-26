@@ -134,6 +134,7 @@ class Settings(BaseSettings):
     chatwoot_api_url: str = Field(default="http://localhost:3000")
     chatwoot_api_key: str = Field(default="")
     chatwoot_account_id: int = Field(default=1)
+    chatwoot_webhook_secret: str = Field(default="")
 
     # ── Graphiti (temporal KG) ─────────────────────────────────────────
     # Graphiti uses FalkorDB — same connection as knowledge graph

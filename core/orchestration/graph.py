@@ -118,8 +118,25 @@ class StatefulToolNode(RunnableCallable):
         return {"messages": tool_messages}
 
     async def _async_invoke(self, state: L1SupportState) -> dict[str, Any]:
-        """Async entry point — delegate to sync invoke."""
-        return self._sync_invoke(state)
+        """Async entry point — execute tools and sync to Chatwoot."""
+        res = self._sync_invoke(state)
+        tool_messages = res.get("messages", [])
+        
+        if tool_messages:
+            try:
+                from core.memory.session import get_session
+                session_data = await get_session(state.session_id)
+                if session_data:
+                    chatwoot_conv_id = session_data.get("chatwoot_conv_id")
+                    if chatwoot_conv_id:
+                        from channels.chat.chatwoot_client import post_message
+                        for msg in tool_messages:
+                            note_content = f"🔧 Tool Execution:\n• Name: {msg.name}\n• Result: {msg.content}"
+                            post_message(chatwoot_conv_id, note_content, private=True)
+            except Exception as e:
+                log.warning("chatwoot_tool_sync_failed", error=str(e))
+                
+        return res
 
 
 log = structlog.get_logger(__name__)
@@ -609,32 +626,48 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
         except Exception as e:
             log.warning("mempalace_write_failed", session_id=state.session_id, error=str(e))
 
-    # Chatwoot: create a real ticket (non-fatal if unavailable)
+    # Chatwoot: create a real ticket / update existing one (non-fatal if unavailable)
     chatwoot_conv_id: str | None = None
     try:
+        from core.memory.session import get_session
+        session_data = await get_session(state.session_id)
+        if session_data:
+            chatwoot_conv_id = session_data.get("chatwoot_conv_id")
+
         from brands.registry import get_brand_by_id
-        from core.integrations.chatwoot import create_conversation, add_message
+        from core.integrations.chatwoot import create_conversation
+        from channels.chat.chatwoot_client import assign_team, add_label, post_message
+        import os
+
         brand_entry = get_brand_by_id(state.brand_id)
         inbox_id = brand_entry.chatwoot_inbox_id if brand_entry else None
-        if inbox_id:
-            # Build a summary message for the agent
-            summary_lines = [
-                f"Session ID: {state.session_id}",
-                f"Intent: {state.intent.issue_type if state.intent else 'unknown'}",
-                f"Confidence: {state.confidence:.0%}",
-                f"Turns: {state.turn_count}",
-                f"Reason: {reason}",
-                "",
-                "Transcript:",
-                transcript,
-            ]
-            initial_msg = "\n".join(summary_lines)
+        
+        # Build escalation summary message
+        summary_lines = [
+            "🚨 SESSION ESCALATED",
+            f"Session ID: {state.session_id}",
+            f"Intent: {state.intent.issue_type if state.intent else 'unknown'}",
+            f"Confidence: {state.confidence:.0%}",
+            f"Turns: {state.turn_count}",
+            f"Reason: {reason}",
+            "",
+            "Transcript:",
+            transcript,
+        ]
+        summary_msg = "\n".join(summary_lines)
+
+        if chatwoot_conv_id:
+            # Existing Chatwoot conversation — post private note summary
+            post_message(chatwoot_conv_id, summary_msg, private=True)
+            log.info("chatwoot_existing_conv_escalated", session_id=state.session_id, conversation_id=chatwoot_conv_id)
+        elif inbox_id:
+            # Create a new conversation (e.g., from voice channel escalation)
             chatwoot_conv_id = create_conversation(
                 brand_id=state.brand_id,
                 inbox_id=inbox_id,
                 customer_name=None,
                 customer_email=None,
-                initial_message=initial_msg,
+                initial_message=summary_msg,
                 session_id=state.session_id,
                 metadata={
                     "intent": state.intent.issue_type if state.intent else "unknown",
@@ -642,13 +675,18 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
                     "turn_count": state.turn_count,
                 },
             )
-            if chatwoot_conv_id:
-                log.info(
-                    "chatwoot_ticket_created",
-                    session_id=state.session_id,
-                    conversation_id=chatwoot_conv_id,
-                    inbox_id=inbox_id,
-                )
+
+        if chatwoot_conv_id:
+            # 1. Assign to L2 Support team (configured via env or default to 1)
+            l2_team_id_str = os.environ.get("CHATWOOT_L2_TEAM_ID") or os.environ.get("CHATWOOT_TEAM_ID", "1")
+            if l2_team_id_str.isdigit():
+                assign_team(chatwoot_conv_id, int(l2_team_id_str))
+            
+            # 2. Tag conversation with intent label
+            if state.intent and state.intent.issue_type:
+                add_label(chatwoot_conv_id, state.intent.issue_type)
+            else:
+                add_label(chatwoot_conv_id, "escalated")
     except Exception as e:
         log.warning("chatwoot_ticket_failed", session_id=state.session_id, error=str(e))
 
@@ -778,6 +816,18 @@ async def node_close_session(state: L1SupportState) -> dict[str, Any]:
             log.info("graphiti_episode_written", session_id=state.session_id, outcome="resolved")
         except Exception as e:
             log.warning("graphiti_write_failed", session_id=state.session_id, error=str(e))
+
+    # Mark Chatwoot conversation as resolved if it is linked
+    try:
+        from core.memory.session import get_session
+        session_data = await get_session(state.session_id)
+        if session_data:
+            chatwoot_conv_id = session_data.get("chatwoot_conv_id")
+            if chatwoot_conv_id:
+                from core.integrations.chatwoot import resolve_conversation
+                resolve_conversation(chatwoot_conv_id)
+    except Exception as e:
+        log.warning("chatwoot_resolve_conversation_failed", error=str(e))
 
     return {
         "is_resolved": True,

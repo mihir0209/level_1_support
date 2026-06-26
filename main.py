@@ -664,7 +664,32 @@ async def chatwoot_webhook(request: Request):
     Receive inbound messages from Chatwoot's webhook.
     Maps Chatwoot conversation to a session and processes the message.
     """
-    payload = await request.json()
+    # 1. Webhook Signature Verification
+    signature = request.headers.get("x-chatwoot-signature")
+    timestamp = request.headers.get("x-chatwoot-timestamp")
+    
+    raw_body = await request.body()
+    
+    if settings.chatwoot_webhook_secret:
+        if not signature or not timestamp:
+            raise HTTPException(status_code=401, detail="Missing signature or timestamp headers")
+        
+        from channels.chat.chatwoot_client import verify_webhook_signature
+        is_valid = verify_webhook_signature(
+            raw_body=raw_body,
+            timestamp=timestamp,
+            received_signature=signature,
+            secret=settings.chatwoot_webhook_secret
+        )
+        if not is_valid:
+            raise HTTPException(status_code=403, detail="Invalid webhook signature")
+
+    import json
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
     event_type = payload.get("event")
 
     if event_type != "message_created":
@@ -682,25 +707,31 @@ async def chatwoot_webhook(request: Request):
     if not content or not chatwoot_conv_id:
         return {"status": "skipped"}
 
-    # Resolve brand from inbox_id via registry
-    from brands.registry import get_brand_by_chatwoot_inbox, BRAND_REGISTRY
-    brand_entry = get_brand_by_chatwoot_inbox(inbox_id) if inbox_id else None
-    default_brand = BRAND_REGISTRY[0].brand_id if BRAND_REGISTRY else "boohoo_uk"
-    brand_id = brand_entry.brand_id if brand_entry else default_brand
+    # 2. Route brand from inbox_id via inbox_router
+    from channels.chat.inbox_router import route_inbox
+    brand_id = route_inbox(inbox_id) if inbox_id else "boohoo_uk"
 
     # Check if session exists for this Chatwoot conversation
     session_key = f"chatwoot:{chatwoot_conv_id}"
-    from core.memory.session import get_redis
+    from core.memory.session import get_redis, update_session
     r = get_redis()
     session_id = await r.get(session_key)
 
     if not session_id:
         session_id = await create_session(brand_id=brand_id, channel=Channel.CHAT.value)
         await r.setex(session_key, 7200, session_id)
+        # Store chatwoot_conv_id inside session dict
+        await update_session(session_id, {"chatwoot_conv_id": chatwoot_conv_id})
 
     # Process message
     chat_req = ChatRequest(session_id=session_id, message=content)
     response = await chat(chat_req)
+
+    # 3. Post reply back to Chatwoot conversation
+    from channels.chat.chatwoot_client import post_message
+    post_ok = post_message(chatwoot_conv_id, response.response, private=False)
+    if not post_ok:
+        log.warning("chatwoot_webhook_reply_failed", chatwoot_conv_id=chatwoot_conv_id)
 
     log.info(
         "chatwoot_message_processed",
@@ -708,6 +739,7 @@ async def chatwoot_webhook(request: Request):
         session_id=session_id,
         brand_id=brand_id,
         intent=response.intent,
+        posted_to_chatwoot=post_ok,
     )
 
     return {"status": "processed", "session_id": session_id, "response": response.response}
