@@ -1,0 +1,111 @@
+{
+  "name": "Policy Change Alert",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "policy-change",
+        "options": {}
+      },
+      "id": "node-webhook-policy",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#brand-managers",
+        "text": "=⚠️ *Policy Change Detected*\n• *Brand:* {{$json.body.brand_id}}\n• *URL:* {{$json.body.url}}\n• *Detected At:* {{$json.body.timestamp}}\n\nA draft of the updated policy has been pushed to the review queue for verification."
+      },
+      "id": "node-slack-managers",
+      "name": "Notify Brand Managers",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://l1_api:8000/admin/review/queue",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Api-Key",
+              "value": "={{$env.ADMIN_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "brand_id",
+              "value": "={{$json.body.brand_id}}"
+            },
+            {
+              "name": "url",
+              "value": "={{$json.body.url}}"
+            },
+            {
+              "name": "new_hash",
+              "value": "={{$json.body.new_hash}}"
+            }
+          ]
+        }
+      },
+      "id": "node-fastapi-queue",
+      "name": "Push to Review Queue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [470, 380]
+    },
+    {
+      "parameters": {
+        "channel": "#l2-agents",
+        "text": "=📢 *Attention L2 Support:* A policy change was detected at {{$json.body.url}} for brand *{{$json.body.brand_id}}*. Please review the changes in the Admin UI."
+      },
+      "id": "node-slack-agents",
+      "name": "Notify L2 Agents",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [690, 380]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Notify Brand Managers",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Push to Review Queue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Push to Review Queue": {
+      "main": [
+        [
+          {
+            "node": "Notify L2 Agents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": []
+}

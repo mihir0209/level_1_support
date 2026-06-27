@@ -711,6 +711,48 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
         except Exception as e:
             log.warning("graphiti_write_failed", session_id=state.session_id, error=str(e))
 
+    # Trigger n8n escalation webhook (in background executor)
+    try:
+        from core.utils.http import http_request
+        from config import settings
+        n8n_webhook_url = f"{settings.n8n_url.rstrip('/')}/webhook/escalation"
+        
+        customer_email = None
+        customer_name = None
+        if state.customer:
+            if isinstance(state.customer, dict):
+                customer_email = state.customer.get("email")
+                customer_name = state.customer.get("name")
+            else:
+                customer_email = getattr(state.customer, "email", None)
+                customer_name = getattr(state.customer, "name", None)
+
+        n8n_payload = {
+            "session_id": state.session_id,
+            "brand_id": state.brand_id,
+            "intent": state.intent.issue_type if state.intent else "unknown",
+            "reason": reason,
+            "transcript": transcript,
+            "chatwoot_conv_id": chatwoot_conv_id,
+            "customer_id": state.customer_id,
+            "customer_email": customer_email,
+            "customer_name": customer_name,
+        }
+
+        loop.run_in_executor(
+            None,
+            lambda: http_request(
+                "POST",
+                n8n_webhook_url,
+                json_body=n8n_payload,
+                timeout=5,
+                max_retries=1
+            )
+        )
+        log.info("n8n_escalation_webhook_triggered", session_id=state.session_id, url=n8n_webhook_url)
+    except Exception as e:
+        log.warning("n8n_escalation_webhook_failed", error=str(e))
+
     return {
         "is_resolved": False,
         "outcome": SessionOutcome.ESCALATED,

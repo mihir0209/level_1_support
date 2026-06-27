@@ -63,6 +63,35 @@ async def detect_change_and_update(brand_id: str, url: str, content: str) -> boo
             current_hash, now, url
         )
         log.info("change_detector_change_detected", brand_id=brand_id, url=url)
+
+        # Trigger n8n policy change webhook (in background executor)
+        try:
+            from core.utils.http import http_request
+            n8n_policy_url = f"{settings.n8n_url.rstrip('/')}/webhook/policy-change"
+            import asyncio
+            
+            n8n_payload = {
+                "brand_id": brand_id,
+                "url": url,
+                "new_hash": current_hash,
+                "timestamp": now.isoformat()
+            }
+            
+            loop = asyncio.get_running_loop()
+            loop.run_in_executor(
+                None,
+                lambda: http_request(
+                    "POST",
+                    n8n_policy_url,
+                    json_body=n8n_payload,
+                    timeout=5,
+                    max_retries=1
+                )
+            )
+            log.info("n8n_policy_change_webhook_triggered", brand_id=brand_id, url=url)
+        except Exception as e:
+            log.warning("n8n_policy_change_webhook_failed", error=str(e))
+
         return True
 
     except Exception as exc:

@@ -26,6 +26,14 @@ async def test_detect_change_and_update(monkeypatch):
         return mock_conn
     monkeypatch.setattr("asyncpg.connect", mock_connect)
 
+    # Mock HTTP requests and event loop to run synchronously in tests
+    mock_http_request = MagicMock()
+    monkeypatch.setattr("core.utils.http.http_request", mock_http_request)
+
+    mock_loop = MagicMock()
+    mock_loop.run_in_executor = lambda executor, func, *args: func(*args)
+    monkeypatch.setattr("asyncio.get_running_loop", lambda: mock_loop)
+
     # Scenario 1: New Page Source (fetchrow returns None)
     mock_conn.fetchrow = AsyncMock(return_value=None)
     
@@ -37,6 +45,7 @@ async def test_detect_change_and_update(monkeypatch):
     assert len(insert_queries) == 1
     assert "crawl_sources" in insert_queries[0]
     queries_run.clear()
+    assert mock_http_request.call_count == 0
 
     # Scenario 2: Unchanged Content (fetchrow returns the same hash)
     mock_conn.fetchrow = AsyncMock(return_value={"last_hash": calculate_hash(initial_content)})
@@ -49,6 +58,7 @@ async def test_detect_change_and_update(monkeypatch):
     assert len(update_queries) == 1
     assert "last_crawled_at" in update_queries[0]
     queries_run.clear()
+    assert mock_http_request.call_count == 0
 
     # Scenario 3: Changed Content (fetchrow returns a different hash)
     mock_conn.fetchrow = AsyncMock(return_value={"last_hash": calculate_hash(initial_content)})
@@ -60,3 +70,11 @@ async def test_detect_change_and_update(monkeypatch):
     update_queries = [q for q, a in queries_run if "UPDATE" in q]
     assert len(update_queries) == 1
     assert "last_hash" in update_queries[0]
+
+    # Verify n8n webhook was triggered on change
+    mock_http_request.assert_called_once()
+    args, kwargs = mock_http_request.call_args
+    assert args[0] == "POST"
+    assert "/webhook/policy-change" in args[1]
+    assert kwargs["json_body"]["brand_id"] == brand_id
+    assert kwargs["json_body"]["url"] == url

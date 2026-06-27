@@ -136,6 +136,9 @@ class Settings(BaseSettings):
     chatwoot_account_id: int = Field(default=1)
     chatwoot_webhook_secret: str = Field(default="")
 
+    # ── n8n ─────────────────────────────────────────────────────────────
+    n8n_url: str = Field(default="http://localhost:5678")
+
     # ── Graphiti (temporal KG) ─────────────────────────────────────────
     # Graphiti uses FalkorDB — same connection as knowledge graph
     graphiti_graph_name: str = Field(default="l1_user_memory")

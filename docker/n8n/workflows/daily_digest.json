@@ -1,0 +1,99 @@
+{
+  "name": "Daily Support Digest",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "cronExpression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "node-schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT brand_id, outcome, turn_count, satisfaction, started_at FROM support_sessions WHERE started_at >= NOW() - INTERVAL '1 day'"
+      },
+      "id": "node-postgres-query",
+      "name": "Fetch Yesterday Sessions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-db-credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = input.all();\nconst stats = {};\n\nlet total = 0;\nlet resolvedCount = 0;\nlet escalatedCount = 0;\nlet totalTurns = 0;\nlet csatSum = 0;\nlet csatCount = 0;\n\nitems.forEach(item => {\n  const row = item.json;\n  total++;\n  if (row.outcome === 'resolved') resolvedCount++;\n  if (row.outcome === 'escalated') escalatedCount++;\n  totalTurns += (row.turn_count || 0);\n  if (row.satisfaction != null) {\n    csatSum += parseFloat(row.satisfaction);\n    csatCount++;\n  }\n});\n\nconst resolutionRate = total > 0 ? (resolvedCount / total) * 100 : 0;\nconst escalationRate = total > 0 ? (escalatedCount / total) * 100 : 0;\nconst avgTurns = total > 0 ? (totalTurns / total) : 0;\nconst avgCsat = csatCount > 0 ? (csatSum / csatCount) : 0;\n\nreturn [{\n  json: {\n    total_sessions: total,\n    resolution_rate_percent: resolutionRate.toFixed(1),\n    escalation_rate_percent: escalationRate.toFixed(1),\n    avg_turns: avgTurns.toFixed(1),\n    avg_csat: avgCsat.toFixed(2),\n    date: new Date().toISOString().split('T')[0]\n  }\n}];"
+      },
+      "id": "node-code-metrics",
+      "name": "Calculate Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#support-ops",
+        "text": "=📊 *Daily Support Digest ({{$json.date}})*\n\n• *Total Sessions:* {{$json.total_sessions}}\n• *Resolution Rate:* {{$json.resolution_rate_percent}}%\n• *Escalation Rate:* {{$json.escalation_rate_percent}}%\n• *Avg Turns per Session:* {{$json.avg_turns}}\n• *Avg CSAT:* {{$json.avg_csat}} / 5.0"
+      },
+      "id": "node-slack-ops",
+      "name": "Post to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [910, 300]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Yesterday Sessions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Yesterday Sessions": {
+      "main": [
+        [
+          {
+            "node": "Calculate Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Metrics": {
+      "main": [
+        [
+          {
+            "node": "Post to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": []
+}

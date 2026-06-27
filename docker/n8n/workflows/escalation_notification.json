@@ -1,0 +1,150 @@
+{
+  "name": "Escalation Notification Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "escalation",
+        "options": {}
+      },
+      "id": "node-webhook-escalation",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#l2-support",
+        "text": "=🚨 *Session Escalated*\n• *Session ID:* {{$json.body.session_id}}\n• *Brand:* {{$json.body.brand_id}}\n• *Intent:* {{$json.body.intent}}\n• *Reason:* {{$json.body.reason}}\n\n*Transcript:* \n```{{$json.body.transcript}}```"
+      },
+      "id": "node-slack-escalation",
+      "name": "Slack Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://chatwoot:3000/api/v1/accounts/1/conversations/{{$json.body.chatwoot_conv_id}}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "api_access_token",
+              "value": "={{$env.CHATWOOT_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "This ticket has been auto-escalated to L2 Support. A team member will assist you shortly."
+            },
+            {
+              "name": "message_type",
+              "value": "outgoing"
+            }
+          ]
+        }
+      },
+      "id": "node-chatwoot-update",
+      "name": "Notify Chatwoot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [470, 380]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linear.app/v1/graphql",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{$env.LINEAR_API_KEY}}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "=mutation { issueCreate(input: { title: \"[L1 Support] Escalation: {{$json.body.session_id}}\", description: \"Session ID: {{$json.body.session_id}}\nBrand: {{$json.body.brand_id}}\nReason: {{$json.body.reason}}\n\nTranscript:\n{{$json.body.transcript}}\", teamId: \"{{$env.LINEAR_TEAM_ID}}\" }) { success } }"
+            }
+          ]
+        }
+      },
+      "id": "node-linear-ticket",
+      "name": "Create Linear Ticket",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [690, 200]
+    },
+    {
+      "parameters": {
+        "fromEmail": "support@l1support.ai",
+        "toEmail": "={{$json.body.customer_email || 'customer@example.com'}}",
+        "subject": "=[L1 Support] Your ticket has been escalated",
+        "html": "=Hi {{$json.body.customer_name || 'Customer'}},<br><br>Your support session regarding <b>{{$json.body.intent}}</b> has been escalated to our specialist L2 support team.<br><br><b>Details:</b><br>- Ticket ID: {{$json.body.session_id}}<br>- Escalation Reason: {{$json.body.reason}}<br><br>Our L2 team will review the issue and get back to you within 2 hours.<br><br>Best regards,<br>L1 Support"
+      },
+      "id": "node-email-customer",
+      "name": "Email Customer",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 1,
+      "position": [690, 380]
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Slack Notification",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Notify Chatwoot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Notification": {
+      "main": [
+        [
+          {
+            "node": "Create Linear Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Chatwoot": {
+      "main": [
+        [
+          {
+            "node": "Email Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": []
+}
