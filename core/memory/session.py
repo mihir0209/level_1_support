@@ -17,6 +17,7 @@ import redis.asyncio as aioredis
 import structlog
 
 from config import settings
+from core.tracing import traced
 
 log = structlog.get_logger(__name__)
 
@@ -38,9 +39,12 @@ def get_redis() -> aioredis.Redis:
     return _redis_client
 
 
+_IN_MEMORY_SESSIONS: dict[str, str] = {}
+
+
 class SessionMemory:
     """
-    Redis-backed session state.
+    Redis-backed session state with in-memory fallback when Redis is down.
     Key: session:{session_id}
     Value: JSON-serialised session dict
     """
@@ -50,27 +54,46 @@ class SessionMemory:
         self._key = f"session:{session_id}"
 
     async def load(self) -> dict[str, Any] | None:
-        r = get_redis()
-        raw = await r.get(self._key)
+        try:
+            r = get_redis()
+            raw = await r.get(self._key)
+        except Exception as exc:
+            log.warning("redis_unavailable_using_in_memory", error=str(exc), key=self._key)
+            raw = _IN_MEMORY_SESSIONS.get(self._key)
         if not raw:
             return None
         return json.loads(raw)
 
+
+    @traced("memory.redis.save")
     async def save(self, data: dict[str, Any]) -> None:
-        r = get_redis()
-        await r.setex(
-            self._key,
-            int(SESSION_TTL.total_seconds()),
-            json.dumps(data, default=str),
-        )
+        raw_val = json.dumps(data, default=str)
+        try:
+            r = get_redis()
+            await r.setex(
+                self._key,
+                int(SESSION_TTL.total_seconds()),
+                raw_val,
+            )
+        except Exception as exc:
+            log.warning("redis_unavailable_using_in_memory", error=str(exc), key=self._key)
+            _IN_MEMORY_SESSIONS[self._key] = raw_val
 
     async def delete(self) -> None:
-        r = get_redis()
-        await r.delete(self._key)
+        try:
+            r = get_redis()
+            await r.delete(self._key)
+        except Exception as exc:
+            log.warning("redis_unavailable_using_in_memory", error=str(exc), key=self._key)
+            _IN_MEMORY_SESSIONS.pop(self._key, None)
 
     async def extend_ttl(self) -> None:
-        r = get_redis()
-        await r.expire(self._key, int(SESSION_TTL.total_seconds()))
+        try:
+            r = get_redis()
+            await r.expire(self._key, int(SESSION_TTL.total_seconds()))
+        except Exception as exc:
+            log.warning("redis_unavailable_using_in_memory", error=str(exc), key=self._key)
+            pass
 
 
 async def create_session(brand_id: str, channel: str, customer_id: str | None = None) -> str:
@@ -96,6 +119,7 @@ async def get_session(session_id: str) -> dict[str, Any] | None:
     return await mem.load()
 
 
+@traced("memory.redis.update")
 async def update_session(session_id: str, updates: dict[str, Any]) -> None:
     mem = SessionMemory(session_id)
     current = await mem.load() or {}

@@ -314,10 +314,13 @@ def _format_user_context_block(
     return block
 
 
+from core.tracing import traced
+
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN ASSEMBLY FUNCTION
 # ═══════════════════════════════════════════════════════════════════════════
 
+@traced("context.assembly")
 async def assemble_context(
     message: str,
     session_id: str,

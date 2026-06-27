@@ -539,12 +539,59 @@ async def new_session(req: NewSessionRequest):
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request = None):
     """
     Process a single chat turn.
     Runs the full LangGraph pipeline: context assembly → route → tools → response.
     """
     t_start = time.monotonic()
+
+    # Rate limiting: limit to 30 turns per hour
+    from core.middleware.rate_limit import check_session_rate_limit
+    limit_ok = await check_session_rate_limit(req.session_id, limit=30, window_seconds=3600)
+    if not limit_ok:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "Rate limit exceeded",
+                "limit": 30,
+                "window_seconds": 3600,
+                "message": "Session rate limit exceeded. Please try again later."
+            }
+        )
+
+    # Input length validation
+    if len(req.message) > 2000:
+        raise HTTPException(
+            status_code=400,
+            detail="Message length exceeds limit of 2000 characters."
+        )
+
+    # Strip HTML/script tags from req.message
+    import re
+    req.message = re.sub(r"<[^>]*>", "", req.message)
+    if not req.message.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Message is empty after sanitization."
+        )
+
+    # Reject obvious prompt injection patterns
+    injection_patterns = [
+        r"(?i)\bignore\s+(all\s+)?prior\s+instructions\b",
+        r"(?i)\bignore\s+previous\s+instructions\b",
+        r"(?i)\boverride\s+safety\b",
+        r"(?i)\byou\s+are\s+now\s+a\b",
+        r"(?i)\byou\s+are\s+now\s+an\b",
+        r"(?i)\bsystem\s+prompt\b"
+    ]
+    for pattern in injection_patterns:
+        if re.search(pattern, req.message):
+            log.warning("prompt_injection_attempted", session_id=req.session_id, message=req.message)
+            raise HTTPException(
+                status_code=400,
+                detail="Potential prompt injection detected."
+            )
 
     # Load session
     session_data = await get_session(req.session_id)
@@ -726,7 +773,7 @@ async def chatwoot_webhook(request: Request):
 
     # Process message
     chat_req = ChatRequest(session_id=session_id, message=content)
-    response = await chat(chat_req)
+    response = await chat(chat_req, request=request)
 
     # 3. Post reply back to Chatwoot conversation
     from channels.chat.chatwoot_client import post_message
@@ -2242,7 +2289,11 @@ async def voice_incoming(request: Request):
     return PlainTextResponse(twiml, media_type="text/xml")
 
 
-@app.post("/voice/start", tags=["Voice"])
+from fastapi import Depends
+from core.middleware.auth import verify_admin_key
+
+
+@app.post("/voice/start", tags=["Voice"], dependencies=[Depends(verify_admin_key)])
 async def voice_start(req: VoiceStartRequest):
     """Dev endpoint — start a voice call session and return the Daily room URL to join."""
     brand_entry = resolve_brand(req.brand)
@@ -2254,7 +2305,7 @@ async def voice_start(req: VoiceStartRequest):
     return call_info
 
 
-@app.get("/voice/active", tags=["Voice"])
+@app.get("/voice/active", tags=["Voice"], dependencies=[Depends(verify_admin_key)])
 async def voice_active():
     """List all active voice calls (admin)."""
     from channels.voice.router import get_active_calls

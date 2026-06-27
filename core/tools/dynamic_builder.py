@@ -93,15 +93,18 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
 
             try:
                 from psycopg.rows import dict_row
-                pool = _get_pool()
-                with pool.connection() as conn:
-                    with conn.cursor(row_factory=dict_row) as cur:
-                        cur.execute(formatted_query, all_params)
-                        if cur.description:
-                            rows = cur.fetchall()
-                            return json.dumps(rows, default=str, indent=2)
-                        else:
-                            return json.dumps({"status": "success", "rowcount": cur.rowcount})
+                from core.tracing import get_tracer, set_span_attributes
+                with get_tracer().start_as_current_span("tool.sql") as span:
+                    set_span_attributes(span, tool_name=spec.name, sql_query=query)
+                    pool = _get_pool()
+                    with pool.connection() as conn:
+                        with conn.cursor(row_factory=dict_row) as cur:
+                            cur.execute(formatted_query, all_params)
+                            if cur.description:
+                                rows = cur.fetchall()
+                                return json.dumps(rows, default=str, indent=2)
+                            else:
+                                return json.dumps({"status": "success", "rowcount": cur.rowcount})
             except Exception as e:
                 log.error("sql_tool_execution_failed", tool_name=spec.name, error=str(e))
                 return f"Database error: {e}"
@@ -118,26 +121,31 @@ Tags: {', '.join(spec.tags) if spec.tags else 'general'}{params_desc}
                 all_params.update(kwargs)
             all_params.update(kw)
 
+            from core.tracing import get_tracer, set_span_attributes
             if module_name and function_name:
                 try:
-                    import importlib
-                    mod = importlib.import_module(module_name)
-                    func = getattr(mod, function_name)
-                    res = func(**all_params)
-                    if isinstance(res, str):
-                        return res
-                    return json.dumps(res, default=str, indent=2)
+                    with get_tracer().start_as_current_span("tool.python") as span:
+                        set_span_attributes(span, tool_name=spec.name, python_module=module_name, python_function=function_name)
+                        import importlib
+                        mod = importlib.import_module(module_name)
+                        func = getattr(mod, function_name)
+                        res = func(**all_params)
+                        if isinstance(res, str):
+                            return res
+                        return json.dumps(res, default=str, indent=2)
                 except Exception as e:
                     log.error("python_module_tool_failed", tool_name=spec.name, error=str(e))
                     return f"Python execution error: {e}"
             elif code:
                 try:
-                    local_vars = {"params": all_params, "result": None}
-                    exec(code, {}, local_vars)
-                    res = local_vars.get("result")
-                    if isinstance(res, str):
-                        return res
-                    return json.dumps(res, default=str, indent=2)
+                    with get_tracer().start_as_current_span("tool.python") as span:
+                        set_span_attributes(span, tool_name=spec.name, python_code=code[:200])
+                        local_vars = {"params": all_params, "result": None}
+                        exec(code, {}, local_vars)
+                        res = local_vars.get("result")
+                        if isinstance(res, str):
+                            return res
+                        return json.dumps(res, default=str, indent=2)
                 except Exception as e:
                     log.error("python_code_tool_failed", tool_name=spec.name, error=str(e))
                     return f"Python execution error: {e}"

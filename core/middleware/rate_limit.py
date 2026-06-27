@@ -166,3 +166,34 @@ async def rate_limit_dependency(
                 "retry_after": reset_in,
             },
         )
+
+
+async def check_session_rate_limit(session_id: str, limit: int = 30, window_seconds: int = 3600) -> bool:
+    """
+    Check if the session has exceeded its turn rate limit (e.g. 30 turns per hour).
+    Uses Redis sliding window. If Redis is down, fails open.
+    """
+    try:
+        r = await _get_redis()
+        key = f"ratelimit:session:{session_id}"
+        now = time.time()
+        window_start = now - window_seconds
+
+        import uuid
+        member = f"{now}:{uuid.uuid4().hex[:6]}"
+
+        pipe = r.pipeline()
+        pipe.zremrangebyscore(key, 0, window_start)
+        pipe.zcard(key)
+        pipe.zadd(key, {member: now})
+        pipe.expire(key, window_seconds + 1)
+        results = await pipe.execute()
+
+        # results[1] is the count before adding the new turn.
+        total_count = results[1] + 1
+        if total_count > limit:
+            return False
+        return True
+    except Exception as exc:
+        log.warning("session_rate_limit_redis_unavailable", session_id=session_id, error=str(exc))
+        return True  # Fail open

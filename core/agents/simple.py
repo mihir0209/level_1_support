@@ -52,6 +52,9 @@ class SimpleAgent:
                 return t
         return None
 
+from core.tracing import traced
+
+    @traced("agent.run")
     async def run(self, task: str) -> str:
         """
         Execute the task through the LLM with tool binding.
@@ -187,6 +190,7 @@ _FALLBACK_SPECIALIST_MAP: dict[str, str] = {
 }
 
 
+@traced("agent.specialist.run")
 async def run_specialist(
     agent: Any,
     task: str,

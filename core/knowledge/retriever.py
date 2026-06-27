@@ -409,54 +409,113 @@ def retrieve_knowledge(
     Also retrieves shipping policy for WISMO/delivery intent types.
     """
     import time
+    import redis
+    import json
+    from config import settings
     t0 = time.monotonic()
 
-    resolutions = get_resolutions_for_issue(brand_id, issue_type_id)
-    policy = get_return_policy(brand_id, order_placed_at)
+    # 3G-4: Cache-aside pattern for FalkorDB queries
+    opt_time = order_placed_at.isoformat() if order_placed_at else "none"
+    cache_key = f"kg_cache:{brand_id}:{issue_type_id}:{region}:{opt_time}:{query_text}:{intent_category}"
+    
+    r_client = None
+    cached_data = None
+    try:
+        r_client = redis.from_url(settings.redis_url, decode_responses=True)
+        cached_raw = r_client.get(cache_key)
+        if cached_raw:
+            cached_data = json.loads(cached_raw)
+    except Exception as exc:
+        log.warning("kg_cache_redis_failed", error=str(exc))
 
-    # Shipping policy is needed for WISMO and delivery queries
-    shipping_policy: dict[str, Any] | None = None
-    if issue_type_id in ("wismo", "delivery_query"):
-        shipping_policy = get_shipping_policy(brand_id, region, order_placed_at)
+    if cached_data:
+        log.info("kg_cache_hit", brand_id=brand_id, key=cache_key)
+        return RetrievalResult(
+            resolutions=cached_data["resolutions"],
+            policy=cached_data["policy"],
+            confidence=cached_data["confidence"],
+            source=cached_data["source"] + "_cached",
+            latency_ms=(time.monotonic() - t0) * 1000,
+            kb_items=cached_data["kb_items"],
+            shipping_policy=cached_data.get("shipping_policy")
+        )
 
-    kb_items: list[dict] = []
+    try:
+        resolutions = get_resolutions_for_issue(brand_id, issue_type_id)
+        policy = get_return_policy(brand_id, order_placed_at)
 
-    if not resolutions and query_text:
-        # Try Text2Cypher first (Pattern B) — uses LLM to generate a targeted graph query
-        # Note: this runs in the thread pool so we use asyncio.run() instead of get_event_loop()
-        if llm_client is not None:
-            import asyncio
+        # Shipping policy is needed for WISMO and delivery queries
+        shipping_policy: dict[str, Any] | None = None
+        if issue_type_id in ("wismo", "delivery_query"):
+            shipping_policy = get_shipping_policy(brand_id, region, order_placed_at)
+
+        kb_items: list[dict] = []
+
+        if not resolutions and query_text:
+            # Try Text2Cypher first (Pattern B) — uses LLM to generate a targeted graph query
+            if llm_client is not None:
+                import asyncio
+                try:
+                    kb_items = asyncio.run(text2cypher_search(query_text, brand_id, llm_client))
+                except RuntimeError as exc:
+                    log.warning("text2cypher_skipped", reason=str(exc), brand_id=brand_id)
+                    kb_items = []
+                if kb_items:
+                    log.info("text2cypher_hit", brand_id=brand_id, items=len(kb_items))
+
+            # Fallback: keyword search across KB nodes (Pattern C)
+            if not kb_items:
+                kb_items = search_kb_nodes(brand_id, query_text, intent_category)
+
+        latency_ms = (time.monotonic() - t0) * 1000
+        confidence = 0.95 if resolutions else (0.75 if kb_items else 0.3)
+        source = "graph_tool" if resolutions else ("text2cypher" if kb_items else "kb_search")
+
+        # Save to Redis Cache (30-min TTL = 1800s)
+        if r_client:
             try:
-                kb_items = asyncio.run(text2cypher_search(query_text, brand_id, llm_client))
-            except RuntimeError as exc:
-                log.warning("text2cypher_skipped", reason=str(exc), brand_id=brand_id)
-                kb_items = []
-            if kb_items:
-                log.info("text2cypher_hit", brand_id=brand_id, items=len(kb_items))
+                r_client.setex(
+                    cache_key,
+                    1800,
+                    json.dumps({
+                        "resolutions": resolutions,
+                        "policy": policy,
+                        "confidence": confidence,
+                        "source": source,
+                        "kb_items": kb_items,
+                        "shipping_policy": shipping_policy
+                    })
+                )
+            except Exception as cache_err:
+                log.warning("kg_cache_save_failed", error=str(cache_err))
 
-        # Fallback: keyword search across KB nodes (Pattern C)
-        if not kb_items:
-            kb_items = search_kb_nodes(brand_id, query_text, intent_category)
+        log.info(
+            "knowledge_retrieved",
+            brand_id=brand_id,
+            issue_type=issue_type_id,
+            resolution_count=len(resolutions),
+            kb_items=len(kb_items),
+            has_shipping=shipping_policy is not None,
+            latency_ms=round(latency_ms, 1),
+        )
+        return RetrievalResult(
+            resolutions=resolutions,
+            policy=policy,
+            confidence=confidence,
+            source=source,
+            latency_ms=latency_ms,
+            kb_items=kb_items,
+            shipping_policy=shipping_policy,
+        )
 
-    latency_ms = (time.monotonic() - t0) * 1000
-    confidence = 0.95 if resolutions else (0.75 if kb_items else 0.3)
-    source = "graph_tool" if resolutions else ("text2cypher" if kb_items else "kb_search")
-
-    log.info(
-        "knowledge_retrieved",
-        brand_id=brand_id,
-        issue_type=issue_type_id,
-        resolution_count=len(resolutions),
-        kb_items=len(kb_items),
-        has_shipping=shipping_policy is not None,
-        latency_ms=round(latency_ms, 1),
-    )
-    return RetrievalResult(
-        resolutions=resolutions,
-        policy=policy,
-        confidence=confidence,
-        source=source,
-        latency_ms=latency_ms,
-        kb_items=kb_items,
-        shipping_policy=shipping_policy,
-    )
+    except Exception as falkor_err:
+        log.error("falkordb_unavailable_using_fallback", error=str(falkor_err))
+        return RetrievalResult(
+            resolutions=[],
+            policy=None,
+            confidence=0.0,
+            source="fallback_empty",
+            latency_ms=(time.monotonic() - t0) * 1000,
+            kb_items=[],
+            shipping_policy=None
+        )
