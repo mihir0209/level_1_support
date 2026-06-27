@@ -19,6 +19,7 @@ import random
 import time
 import uuid
 import warnings
+import json
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -1369,6 +1370,279 @@ async def get_session_detail(session_id: str):
     if not data:
         raise HTTPException(status_code=404, detail="Session not found")
     return data
+
+
+# ── Review Queue endpoints ──────────────────────────────────────────────────
+class StepModel(BaseModel):
+    order: int
+    instruction: str
+    tool_required: str | None = None
+    condition: str | None = None
+
+class ResolutionUpdateModel(BaseModel):
+    name: str
+    steps: list[StepModel]
+    escalation_trigger: str | None = None
+
+@admin_router.get("/review/queue", tags=["Review Queue"])
+async def get_review_queue(
+    brand_id: str | None = None,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0)
+):
+    """Retrieve unreviewed items from the resolution review queue."""
+    if not settings.postgres_host:
+        return {"count": 0, "items": []}
+
+    try:
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        async with pool.connection() as conn:
+            count_q = "SELECT COUNT(*) FROM resolution_review_queue WHERE reviewed = false"
+            params = []
+            if brand_id:
+                count_q += " AND brand_id = %s"
+                params.append(brand_id)
+            count = await (await conn.execute(count_q, params)).fetchone()
+            total_count = count[0] if count else 0
+
+            items_q = (
+                "SELECT id, brand_id, issue_type, resolution_tried, failure_reason, conversation, created_at "
+                "FROM resolution_review_queue WHERE reviewed = false"
+            )
+            item_params = []
+            if brand_id:
+                items_q += " AND brand_id = %s"
+                item_params.append(brand_id)
+            items_q += " ORDER BY created_at DESC LIMIT %s OFFSET %s"
+            item_params.extend([limit, offset])
+
+            rows = await (await conn.execute(items_q, item_params)).fetchall()
+
+        items = []
+        for r in rows:
+            item_id = str(r[0])
+            item_brand_id = r[1]
+            issue_type = r[2]
+            resolution_tried = r[3]
+            failure_reason = r[4]
+            conversation = r[5]
+            created_at = r[6]
+
+            resolution_details = None
+            if resolution_tried:
+                try:
+                    _, graph = get_graph_client()
+                    graph_res = graph.query(
+                        "MATCH (r:Resolution {id: $res_id}) RETURN r.name, r.steps, r.escalation_trigger",
+                        {"res_id": resolution_tried}
+                    ).result_set
+                    if graph_res:
+                        res_name = graph_res[0][0]
+                        res_steps_raw = graph_res[0][1]
+                        res_esc = graph_res[0][2]
+                        
+                        res_steps = []
+                        if res_steps_raw:
+                            try:
+                                res_steps = json.loads(res_steps_raw)
+                            except Exception:
+                                res_steps = res_steps_raw
+                                
+                        resolution_details = {
+                            "name": res_name,
+                            "steps": res_steps,
+                            "escalation_trigger": res_esc
+                        }
+                except Exception as g_err:
+                    log.warning("review_queue_fetch_falkordb_failed", res_id=resolution_tried, error=str(g_err))
+
+            items.append({
+                "id": item_id,
+                "brand_id": item_brand_id,
+                "issue_type": issue_type,
+                "resolution_tried": resolution_tried,
+                "failure_reason": failure_reason,
+                "conversation": conversation,
+                "created_at": created_at.isoformat() if created_at else None,
+                "resolution_details": resolution_details
+            })
+
+        return {"count": total_count, "items": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+@admin_router.post("/review/{item_id}/approve", tags=["Review Queue"])
+async def approve_review_item(item_id: str, payload: ResolutionUpdateModel | None = None):
+    """Approve a review item, optionally updating its Resolution node in FalkorDB, and clear the queue entry."""
+    import uuid
+    if not settings.postgres_host:
+        raise HTTPException(status_code=503, detail="Postgres not configured")
+
+    try:
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        
+        async with pool.connection() as conn:
+            row = await (await conn.execute(
+                "SELECT brand_id, issue_type, resolution_tried FROM resolution_review_queue WHERE id = %s",
+                (uuid.UUID(item_id),)
+            )).fetchone()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Review queue item not found")
+                
+            brand_id, issue_type, resolution_tried = row
+
+        if payload and resolution_tried:
+            try:
+                _, graph = get_graph_client()
+                steps_data = [
+                    {"order": s.order, "instruction": s.instruction,
+                     "tool_required": s.tool_required, "condition": s.condition}
+                    for s in payload.steps
+                ]
+                
+                requires_tool = any(s.tool_required is not None for s in payload.steps)
+                
+                graph.query(
+                    """
+                    MERGE (r:Resolution {id: $res_id})
+                    SET r.name = $name,
+                        r.requires_tool_call = $requires_tool_call,
+                        r.steps = $steps,
+                        r.escalation_trigger = $escalation_trigger
+                    WITH r
+                    MATCH (it:IssueType {id: $issue_id})
+                    MERGE (it)-[:RESOLVED_BY {priority: 1}]->(r)
+                    """,
+                    {
+                        "res_id": resolution_tried,
+                        "name": payload.name,
+                        "requires_tool_call": requires_tool,
+                        "steps": json.dumps(steps_data),
+                        "escalation_trigger": payload.escalation_trigger,
+                        "issue_id": issue_type
+                    }
+                )
+                log.info("review_queue_falkordb_updated", res_id=resolution_tried)
+            except Exception as g_err:
+                log.warning("review_queue_approve_falkordb_failed", res_id=resolution_tried, error=str(g_err))
+                raise HTTPException(status_code=503, detail=f"FalkorDB update failed: {g_err}")
+
+        async with pool.connection() as conn:
+            await conn.execute(
+                "UPDATE resolution_review_queue SET reviewed = true WHERE id = %s",
+                (uuid.UUID(item_id),)
+            )
+
+        log.info("resolution_review_approved", item_id=item_id, resolution_id=resolution_tried)
+        return {"status": "approved", "item_id": item_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class RejectRequestModel(BaseModel):
+    reason: str | None = None
+
+@admin_router.post("/review/{item_id}/reject", tags=["Review Queue"])
+async def reject_review_item(item_id: str, payload: RejectRequestModel | None = None):
+    """Reject a review item (clear queue entry without updating FalkorDB, and log the reason)."""
+    import uuid
+    if not settings.postgres_host:
+        raise HTTPException(status_code=503, detail="Postgres not configured")
+
+    try:
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        
+        async with pool.connection() as conn:
+            row = await (await conn.execute(
+                "SELECT id FROM resolution_review_queue WHERE id = %s",
+                (uuid.UUID(item_id),)
+            )).fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Review queue item not found")
+
+            await conn.execute(
+                "UPDATE resolution_review_queue SET reviewed = true WHERE id = %s",
+                (uuid.UUID(item_id),)
+            )
+
+        reason = payload.reason if payload else "No reason provided"
+        log.info("resolution_review_rejected", item_id=item_id, reason=reason)
+        return {"status": "rejected", "item_id": item_id, "reason": reason}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@admin_router.post("/review/{item_id}/edit", tags=["Review Queue"])
+async def edit_review_item(item_id: str, payload: ResolutionUpdateModel):
+    """Edit the Resolution node in FalkorDB directly, without closing the queue entry yet."""
+    import uuid
+    if not settings.postgres_host:
+        raise HTTPException(status_code=503, detail="Postgres not configured")
+
+    try:
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        
+        async with pool.connection() as conn:
+            row = await (await conn.execute(
+                "SELECT issue_type, resolution_tried FROM resolution_review_queue WHERE id = %s",
+                (uuid.UUID(item_id),)
+            )).fetchone()
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Review queue item not found")
+                
+            issue_type, resolution_tried = row
+
+        if not resolution_tried:
+            raise HTTPException(status_code=400, detail="No resolution ID linked to this queue item")
+
+        try:
+            _, graph = get_graph_client()
+            steps_data = [
+                {"order": s.order, "instruction": s.instruction,
+                 "tool_required": s.tool_required, "condition": s.condition}
+                for s in payload.steps
+            ]
+            
+            requires_tool = any(s.tool_required is not None for s in payload.steps)
+            
+            graph.query(
+                """
+                MERGE (r:Resolution {id: $res_id})
+                SET r.name = $name,
+                    r.requires_tool_call = $requires_tool_call,
+                    r.steps = $steps,
+                    r.escalation_trigger = $escalation_trigger
+                WITH r
+                MATCH (it:IssueType {id: $issue_id})
+                MERGE (it)-[:RESOLVED_BY {priority: 1}]->(r)
+                """,
+                {
+                    "res_id": resolution_tried,
+                    "name": payload.name,
+                    "requires_tool_call": requires_tool,
+                    "steps": json.dumps(steps_data),
+                    "escalation_trigger": payload.escalation_trigger,
+                    "issue_id": issue_type
+                }
+            )
+            log.info("review_queue_falkordb_edited", res_id=resolution_tried)
+        except Exception as g_err:
+            log.warning("review_queue_edit_falkordb_failed", res_id=resolution_tried, error=str(g_err))
+            raise HTTPException(status_code=503, detail=f"FalkorDB update failed: {g_err}")
+
+        return {"status": "edited", "resolution_id": resolution_tried}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── System endpoints ──────────────────────────────────────────────────────────

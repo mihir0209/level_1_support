@@ -28,6 +28,7 @@ function app() {
     navTabs: [
       { id: 'demo',         label: 'Support Demo' },
       { id: 'sessions',     label: 'Sessions' },
+      { id: 'review',       label: 'Review Queue' },
       { id: 'monitoring',  label: 'Monitoring' },
       { id: 'brands',       label: 'Brands' },
       { id: 'graph',        label: 'Graph' },
@@ -740,6 +741,162 @@ function app() {
         await this.loadVoiceCalls();
       } catch (e) { this.toast('Voice call failed: ' + e.message, 'toast-error'); }
       finally { this.voiceLoading = false; }
+    },
+
+    // ════════════════════════════════════════════════════════════════
+    // REVIEW QUEUE
+    // ════════════════════════════════════════════════════════════════
+    reviewQueueItems: [],
+    reviewQueueCount: 0,
+    reviewQueueLimit: 20,
+    reviewQueueOffset: 0,
+    reviewQueueBrandFilter: '',
+    reviewLoading: false,
+    selectedReviewItem: null,
+    editSteps: [],
+    editName: '',
+    editEscalationTrigger: '',
+    rejectionReason: '',
+
+    async loadReviewQueue() {
+      this.reviewLoading = true;
+      try {
+        let path = `/admin/review/queue?limit=${this.reviewQueueLimit}&offset=${this.reviewQueueOffset}`;
+        if (this.reviewQueueBrandFilter) {
+          path += `&brand_id=${this.reviewQueueBrandFilter}`;
+        }
+        const data = await this.api(path);
+        this.reviewQueueItems = data.items || [];
+        this.reviewQueueCount = data.count || 0;
+        
+        // Auto select first item if none selected and items are available
+        if (this.reviewQueueItems.length && !this.selectedReviewItem) {
+          this.selectReviewItem(this.reviewQueueItems[0]);
+        } else if (!this.reviewQueueItems.length) {
+          this.selectedReviewItem = null;
+        }
+      } catch (e) {
+        this.toast('Failed to load review queue: ' + e.message, 'toast-error');
+      } finally {
+        this.reviewLoading = false;
+      }
+    },
+
+    selectReviewItem(item) {
+      this.selectedReviewItem = item;
+      this.rejectionReason = '';
+      if (item && item.resolution_details) {
+        this.editName = item.resolution_details.name || '';
+        this.editEscalationTrigger = item.resolution_details.escalation_trigger || '';
+        this.editSteps = JSON.parse(JSON.stringify(item.resolution_details.steps || []));
+      } else {
+        this.editName = '';
+        this.editEscalationTrigger = '';
+        this.editSteps = [];
+      }
+    },
+
+    addEditStep() {
+      const nextOrder = this.editSteps.length ? Math.max(...this.editSteps.map(s => s.order)) + 1 : 1;
+      this.editSteps.push({
+        order: nextOrder,
+        instruction: '',
+        tool_required: null,
+        condition: null
+      });
+    },
+
+    removeEditStep(index) {
+      this.editSteps.splice(index, 1);
+      this.editSteps.forEach((s, idx) => {
+        s.order = idx + 1;
+      });
+    },
+
+    moveEditStep(index, direction) {
+      if (direction === 'up' && index > 0) {
+        const temp = this.editSteps[index - 1];
+        this.editSteps[index - 1] = this.editSteps[index];
+        this.editSteps[index] = temp;
+      } else if (direction === 'down' && index < this.editSteps.length - 1) {
+        const temp = this.editSteps[index + 1];
+        this.editSteps[index + 1] = this.editSteps[index];
+        this.editSteps[index] = temp;
+      }
+      this.editSteps.forEach((s, idx) => {
+        s.order = idx + 1;
+      });
+    },
+
+    async approveReviewItem(item, useCurrentSteps = false) {
+      this.reviewLoading = true;
+      try {
+        let payload = null;
+        if (useCurrentSteps) {
+          payload = {
+            name: this.editName,
+            steps: this.editSteps,
+            escalation_trigger: this.editEscalationTrigger || null
+          };
+        }
+        await this.api(`/admin/review/${item.id}/approve`, {
+          method: 'POST',
+          body: payload ? JSON.stringify(payload) : undefined
+        });
+        this.toast('Item approved and cleared', 'toast-success');
+        this.selectedReviewItem = null;
+        await this.loadReviewQueue();
+      } catch (e) {
+        this.toast('Approve failed: ' + e.message, 'toast-error');
+      } finally {
+        this.reviewLoading = false;
+      }
+    },
+
+    async rejectReviewItem(item) {
+      if (!this.rejectionReason.trim()) {
+        this.toast('Please provide a rejection reason', 'toast-error');
+        return;
+      }
+      this.reviewLoading = true;
+      try {
+        await this.api(`/admin/review/${item.id}/reject`, {
+          method: 'POST',
+          body: JSON.stringify({ reason: this.rejectionReason })
+        });
+        this.toast('Item rejected and cleared', 'toast-success');
+        this.selectedReviewItem = null;
+        await this.loadReviewQueue();
+      } catch (e) {
+        this.toast('Reject failed: ' + e.message, 'toast-error');
+      } finally {
+        this.reviewLoading = false;
+      }
+    },
+
+    async saveReviewItemEdit(item) {
+      this.reviewLoading = true;
+      try {
+        const payload = {
+          name: this.editName,
+          steps: this.editSteps,
+          escalation_trigger: this.editEscalationTrigger || null
+        };
+        await this.api(`/admin/review/${item.id}/edit`, {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        this.toast('Resolution steps updated in FalkorDB', 'toast-success');
+        item.resolution_details = {
+          name: this.editName,
+          steps: JSON.parse(JSON.stringify(this.editSteps)),
+          escalation_trigger: this.editEscalationTrigger || null
+        };
+      } catch (e) {
+        this.toast('Update failed: ' + e.message, 'toast-error');
+      } finally {
+        this.reviewLoading = false;
+      }
     },
   };
 }
