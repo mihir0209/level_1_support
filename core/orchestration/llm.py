@@ -141,6 +141,24 @@ class LLMClient:
                 max_tokens=max_tokens,
                 **extra,
             )
+            
+            # Increment Prometheus billing / token usage counters
+            if hasattr(resp, "usage") and resp.usage:
+                try:
+                    from core.logging_config import get_active_brand_id
+                    from core.metrics import TOKEN_USAGE_INPUT, TOKEN_USAGE_OUTPUT
+                    brand_id = get_active_brand_id() or "unknown"
+                    
+                    p_tok = getattr(resp.usage, "prompt_tokens", 0) or 0
+                    c_tok = getattr(resp.usage, "completion_tokens", 0) or 0
+                    
+                    if p_tok > 0:
+                        TOKEN_USAGE_INPUT.labels(brand_id=brand_id).inc(p_tok)
+                    if c_tok > 0:
+                        TOKEN_USAGE_OUTPUT.labels(brand_id=brand_id).inc(c_tok)
+                except Exception as ex:
+                    log.warning("metrics_token_usage_failed", error=str(ex))
+
             return resp.choices[0].message.content or ""
         except Exception as e:
             log.error("llm_generate_failed", model=target_model, provider=self.provider, error=str(e))

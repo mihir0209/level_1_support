@@ -214,3 +214,16 @@ class BrandApiCredential(Base):
     )
 
     config: Mapped["BrandApiConfig"] = relationship("BrandApiConfig", back_populates="credentials")
+
+
+class RegisteredBrand(Base):
+    __tablename__ = "registered_brands"
+
+    brand_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    domain: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    timezone: Mapped[str] = mapped_column(String(50), default="UTC", server_default="UTC")
+    locale: Mapped[str] = mapped_column(String(10), default="en_US", server_default="en_US")
+    brand_voice: Mapped[str | None] = mapped_column(Text, nullable=True)
+    config: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

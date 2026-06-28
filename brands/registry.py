@@ -133,3 +133,59 @@ def register_brand(entry: BrandEntry) -> bool:
     if entry.chatwoot_inbox_id is not None:
         _by_chatwoot_inbox[entry.chatwoot_inbox_id] = entry
     return True
+
+
+def load_brands_from_db() -> None:
+    """
+    Load all registered brands from PostgreSQL database into memory registry.
+    """
+    try:
+        from core.db.pool import get_sync_pool
+        pool = get_sync_pool()
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                # Check if the table exists first (to prevent errors during migrations)
+                cur.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'registered_brands'
+                    );
+                """)
+                exists = cur.fetchone()[0]
+                if not exists:
+                    return
+
+                cur.execute("""
+                    SELECT brand_id, name, domain, timezone, locale, brand_voice, config 
+                    FROM registered_brands;
+                """)
+                rows = cur.fetchall()
+                for row in rows:
+                    brand_id, name, domain, timezone, locale, brand_voice, config = row
+                    if isinstance(config, str):
+                        import json
+                        config_dict = json.loads(config)
+                    else:
+                        config_dict = config or {}
+
+                    # Construct BrandEntry
+                    domains = config_dict.get("domains") or [domain, brand_id]
+                    locales = config_dict.get("locales") or [locale]
+                    default_region = config_dict.get("default_region") or "UK"
+                    chatwoot_inbox_id = config_dict.get("chatwoot_inbox_id")
+                    industry_domain = config_dict.get("industry_domain") or "ecommerce"
+
+                    entry = BrandEntry(
+                        brand_id=brand_id,
+                        name=name,
+                        domains=domains,
+                        locales=locales,
+                        default_region=default_region,
+                        chatwoot_inbox_id=chatwoot_inbox_id,
+                        domain=industry_domain,
+                    )
+                    register_brand(entry)
+    except Exception as e:
+        import structlog
+        structlog.get_logger(__name__).warning("load_brands_from_db_failed", error=str(e))

@@ -573,7 +573,8 @@ def upsert_brand(graph, brand: Brand) -> None:
     graph.query(
         """
         MERGE (b:Brand {id: $id})
-        SET b.name = $name,
+        SET b.brand_id = $id,
+            b.name = $name,
             b.group_id = $group_id,
             b.domain = $domain,
             b.help_center_url = $help_center_url,

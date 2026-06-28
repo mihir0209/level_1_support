@@ -36,12 +36,17 @@ session_id_var: ContextVar[str] = ContextVar("session_id", default="")
 
 def bind_correlation(request_id: str | None = None, brand_id: str | None = None, session_id: str | None = None) -> None:
     """Bind correlation IDs to log context. Call per-request."""
-    if request_id:
+    if request_id is not None:
         request_id_var.set(request_id)
-    if brand_id:
+    if brand_id is not None:
         brand_id_var.set(brand_id)
-    if session_id:
+    if session_id is not None:
         session_id_var.set(session_id)
+
+
+def get_active_brand_id() -> str:
+    """Get the active brand_id in the current async context."""
+    return brand_id_var.get()
 
 
 def clear_correlation() -> None:

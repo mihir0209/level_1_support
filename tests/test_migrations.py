@@ -46,7 +46,7 @@ class TestMigrationCommands:
             pytest.skip("Postgres database not reachable (skipping alembic current test)")
 
         env = os.environ.copy()
-        if env.get("POSTGRES_HOST") == "postgres":
+        if env.get("POSTGRES_HOST", "postgres") == "postgres":
             env["POSTGRES_HOST"] = "localhost"
 
         result = subprocess.run(
@@ -125,6 +125,7 @@ class TestModelsMatchSchema:
             "knowledge_chunks", "support_sessions", "intent_label_queue",
             "resolution_review_queue", "crawl_sources", "brand_api_config",
             "registered_api_endpoints", "brand_api_credentials",
+            "registered_brands",
         }
         assert expected.issubset(tables), f"Missing tables: {expected - tables}"
 

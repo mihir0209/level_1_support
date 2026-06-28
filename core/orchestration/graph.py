@@ -587,6 +587,13 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
         for m in state.messages
     ]
 
+    # Increment Prometheus escalation counter
+    try:
+        from core.metrics import ESCALATION_TOTAL
+        ESCALATION_TOTAL.labels(brand_id=state.brand_id, reason=reason).inc()
+    except Exception as e:
+        log.warning("metrics_escalation_inc_failed", error=str(e))
+
     # Feedback loop via feedback engine
     try:
         from feedback.engine import on_session_escalate

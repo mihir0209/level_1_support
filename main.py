@@ -51,10 +51,14 @@ from core.ontology.seed_data import seed_all_with_kb as seed_all, get_graph_clie
 log = structlog.get_logger(__name__)
 
 # ── Prometheus metrics ────────────────────────────────────────────────────
-MESSAGES_TOTAL = Counter("l1_messages_total", "Total messages processed", ["brand_id", "channel"])
-RESOLUTION_LATENCY = Histogram("l1_resolution_latency_seconds", "End-to-end latency per turn")
-ESCALATION_TOTAL = Counter("l1_escalations_total", "Total escalations", ["brand_id", "reason"])
-SESSIONS_TOTAL = Counter("l1_sessions_total", "Total sessions created", ["brand_id", "channel"])
+from core.metrics import (
+    MESSAGES_TOTAL,
+    RESOLUTION_LATENCY,
+    ESCALATION_TOTAL,
+    SESSIONS_TOTAL,
+    TOKEN_USAGE_INPUT,
+    TOKEN_USAGE_OUTPUT,
+)
 
 
 # ── Lifespan: startup / shutdown ──────────────────────────────────────────
@@ -84,23 +88,13 @@ async def lifespan(app: FastAPI):
     init_pools()
     await open_async_pool()
 
-    # Restore dynamically registered brands from Redis
+    # Restore dynamically registered brands from PostgreSQL database
     try:
-        import json as _j
-        from core.memory.session import get_redis
-        from brands.registry import BrandEntry, register_brand
-        _r = get_redis()
-        stored = await _r.hgetall("brand_registry")
-        for _raw in stored.values():
-            try:
-                _d = _j.loads(_raw)
-                register_brand(BrandEntry(**_d))
-            except Exception:
-                pass
-        if stored:
-            log.info("dynamic_brands_restored", count=len(stored))
+        from brands.registry import load_brands_from_db
+        load_brands_from_db()
+        log.info("dynamic_brands_restored_from_db")
     except Exception as e:
-        log.warning("dynamic_brands_restore_failed", error=str(e))
+        log.warning("dynamic_brands_db_restore_failed", error=str(e))
 
     # Verify graph connectivity and seed data on startup
     if verify_connectivity():
@@ -205,6 +199,40 @@ app.add_middleware(
 app.middleware("http")(rate_limit_middleware)
 
 
+def extract_brand_id(request: Request) -> str:
+    # 1. Check query parameters
+    brand_id = request.query_params.get("brand_id")
+    if brand_id:
+        return brand_id
+
+    # 2. Check X-Brand-ID or X-Brand header
+    brand_id = request.headers.get("X-Brand-ID") or request.headers.get("X-Brand")
+    if brand_id:
+        return brand_id
+
+    # 3. Check request path parameters (e.g. /admin/brands/{brand_id} or /graph/brand/{brand_id})
+    path = request.url.path
+    path_parts = [p for p in path.split("/") if p]
+    for idx, segment in enumerate(path_parts):
+        if segment in ("brands", "brand") and idx + 1 < len(path_parts):
+            val = path_parts[idx + 1]
+            if val not in ("queue", "outcome", "feedback"):  # avoid false positives
+                return val
+
+    # 4. Check hostname mapping via resolve_brand
+    hostname = request.url.hostname
+    if hostname:
+        try:
+            from brands.registry import resolve_brand
+            brand_entry = resolve_brand(hostname)
+            if brand_entry:
+                return brand_entry.brand_id
+        except Exception:
+            pass
+
+    return ""
+
+
 @app.middleware("http")
 async def correlation_middleware(request: Request, call_next):
     """
@@ -213,7 +241,7 @@ async def correlation_middleware(request: Request, call_next):
     """
     import uuid
     request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())[:16]
-    brand_id = request.query_params.get("brand_id") or ""
+    brand_id = extract_brand_id(request)
     session_id = request.headers.get("X-Session-ID") or ""
     bind_correlation(request_id=request_id, brand_id=brand_id, session_id=session_id)
     response = await call_next(request)
@@ -668,7 +696,7 @@ async def chat(req: ChatRequest, request: Request = None):
 
     latency_ms = (time.monotonic() - t_start) * 1000
     MESSAGES_TOTAL.labels(brand_id=brand_id, channel=channel.value).inc()
-    RESOLUTION_LATENCY.observe(latency_ms / 1000)
+    RESOLUTION_LATENCY.labels(brand_id=brand_id).observe(latency_ms / 1000)
 
     intent_id = (
         result_state.get("intent").issue_type
@@ -1258,7 +1286,41 @@ async def add_brand(req: BrandRegisterRequest):
     if not added:
         raise HTTPException(status_code=409, detail=f"Brand '{req.brand_id}' already exists.")
 
-    # Persist to Redis so dynamic brands survive restarts
+    # Persist to PostgreSQL and Redis so dynamic brands survive restarts
+    try:
+        import json
+        from core.db.pool import get_sync_pool
+        pool = get_sync_pool()
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO registered_brands (brand_id, name, domain, timezone, locale, config)
+                    VALUES (%(brand_id)s, %(name)s, %(domain)s, %(timezone)s, %(locale)s, %(config)s)
+                    ON CONFLICT (brand_id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        domain = EXCLUDED.domain,
+                        timezone = EXCLUDED.timezone,
+                        locale = EXCLUDED.locale,
+                        config = EXCLUDED.config;
+                    """,
+                    {
+                        "brand_id": req.brand_id,
+                        "name": req.name,
+                        "domain": req.domains[0] if req.domains else f"{req.brand_id}.com",
+                        "timezone": "UTC",
+                        "locale": req.locales[0] if req.locales else "en_US",
+                        "config": json.dumps({
+                            "domains": req.domains,
+                            "locales": req.locales,
+                            "default_region": req.default_region,
+                            "chatwoot_inbox_id": req.chatwoot_inbox_id,
+                        })
+                    }
+                )
+    except Exception as e:
+        log.warning("brand_db_persist_failed", brand_id=req.brand_id, error=str(e))
+
     try:
         import json
         from core.memory.session import get_redis
