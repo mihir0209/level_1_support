@@ -164,6 +164,72 @@ class LLMClient:
             log.error("llm_generate_failed", model=target_model, provider=self.provider, error=str(e))
             raise
 
+    async def detect_language(self, text: str) -> str:
+        """
+        Detect language of a given text.
+        Returns ISO 639-1 language code (e.g. 'en', 'es', 'fr', 'de').
+        """
+        # Strip common punctuation and whitespaces
+        clean_text = (text or "").strip()
+        if not clean_text:
+            return "en"
+
+        # Check if text consists only of basic ascii chars and is short/simple -> default to english
+        # to avoid invoking the LLM for trivial statements (saves latency/tokens)
+        if len(clean_text) < 15 and all(ord(c) < 128 for c in clean_text):
+            return "en"
+
+        prompt = f"Analyze the language of the following user message. Respond with ONLY the 2-letter ISO 639-1 language code (e.g. 'en', 'es', 'fr', 'de', 'it').\n\nMessage: {clean_text}"
+        try:
+            res = await self.generate(
+                prompt=prompt,
+                system="You are a precise language classifier. Output ONLY the 2-letter ISO code.",
+                fast=True,
+                max_tokens=5,
+            )
+            code = res.strip().lower()[:2]
+            if len(code) == 2 and code.isalpha():
+                return code
+        except Exception as e:
+            log.warning("language_detection_failed", error=str(e))
+        return "en"
+
+    async def translate_content(self, text: str, target_lang: str) -> str:
+        """
+        Translate the given content to the target language locale.
+        """
+        if not text or not target_lang:
+            return text
+
+        if target_lang.lower() == "en":
+            # If target is English, and text consists only of basic English characters, return directly
+            if all(ord(c) < 128 for c in text):
+                return text
+
+        # Map 2-letter codes to friendly names for better LLM quality
+        lang_names = {
+            "es": "Spanish",
+            "fr": "French",
+            "de": "German",
+            "it": "Italian",
+            "pt": "Portuguese",
+            "nl": "Dutch",
+        }
+        target_name = lang_names.get(target_lang.lower(), target_lang)
+
+        prompt = f"Translate the following text into {target_name}. Respond with ONLY the translated text, preserving all formatting and placeholders (like HTML, links, or order IDs). Do not include any explanations or conversational chatter.\n\nText: {text}"
+        try:
+            res = await self.generate(
+                prompt=prompt,
+                system=f"You are a professional translator translating content to {target_name}. Output ONLY the raw translation.",
+                fast=True,
+                max_tokens=2048,
+            )
+            return res.strip()
+        except Exception as e:
+            log.warning("translation_failed", target_lang=target_lang, error=str(e))
+        return text
+
     def get_lc_client(self, fast: bool = False):
         """LangChain-compatible client for LangGraph nodes with tool binding."""
         return _lc_client(fast=fast)

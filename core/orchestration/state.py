@@ -62,5 +62,6 @@ class L1SupportState(BaseModel):
     escalation_reason: str | None = None
     outcome: SessionOutcome | None = None
     satisfaction: float | None = None   # 0.0–1.0 CSAT score
+    locale: str = "en"                  # Detected user language locale (e.g. 'en', 'es', 'fr')
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

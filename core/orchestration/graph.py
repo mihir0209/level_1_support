@@ -168,13 +168,25 @@ async def node_assemble_context(state: L1SupportState) -> dict[str, Any]:
             last_user_message = msg.content
             break
 
+    # Detect user language
+    locale = "en"
+    translated_message = last_user_message
+    if last_user_message:
+        locale = await llm.detect_language(last_user_message)
+        if locale != "en":
+            translated_message = await llm.translate_content(last_user_message, "en")
+            log.info("message_translated_to_english", original=last_user_message, translated=translated_message, locale=locale)
+
     # Build conversation history list for context engine
-    history = [
-        {"role": "user" if isinstance(m, HumanMessage) else "assistant",
-         "content": m.content if hasattr(m, "content") else str(m)}
-        for m in state.messages[:-1]  # exclude current message (already in last_user_message)
-        if not isinstance(m, ToolMessage)
-    ]
+    history = []
+    for m in state.messages[:-1]:  # exclude current message (already in last_user_message)
+        if isinstance(m, ToolMessage):
+            continue
+        role = "user" if isinstance(m, HumanMessage) else "assistant"
+        content = m.content if hasattr(m, "content") else str(m)
+        if locale != "en" and content:
+            content = await llm.translate_content(content, "en")
+        history.append({"role": role, "content": content})
 
     # Get order date for temporal policy lookup (from first order if available)
     order_placed_at = None
@@ -182,7 +194,7 @@ async def node_assemble_context(state: L1SupportState) -> dict[str, Any]:
         order_placed_at = state.customer.recent_orders[0].placed_at
 
     context_package = await assemble_context(
-        message=last_user_message,
+        message=translated_message,
         session_id=state.session_id,
         brand_id=state.brand_id,
         channel=state.channel,
@@ -195,6 +207,7 @@ async def node_assemble_context(state: L1SupportState) -> dict[str, Any]:
     log.info(
         "context_assembled",
         session_id=state.session_id,
+        locale=locale,
         intent=context_package.intent.issue_type if context_package.intent else "unknown",
         latency_ms=round(context_package.assembly_latency_ms, 1),
     )
@@ -230,6 +243,7 @@ async def node_assemble_context(state: L1SupportState) -> dict[str, Any]:
         "confidence": effective_conf,
         "turn_count": state.turn_count + 1,
         "dynamic_tools": dynamic_tools,
+        "locale": locale,
     }
 
 
@@ -258,6 +272,11 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
         elif hasattr(msg, "content"):
             last_msg = msg.content
             break
+
+    if state.locale != "en" and last_msg:
+        from core.orchestration.llm import get_llm_client
+        llm = get_llm_client()
+        last_msg = await llm.translate_content(last_msg, "en")
 
     entities_dict = state.entities.model_dump() if state.entities else {}
     entity_str = ", ".join(f"{k}={v}" for k, v in entities_dict.items() if v is not None) if entities_dict else "none"
@@ -313,7 +332,7 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
 # NODE: generate_response
 # ─────────────────────────────────────────────────────────────────────────
 
-def _build_llm_messages(state: L1SupportState) -> list:
+async def _build_llm_messages(state: L1SupportState) -> list:
     """
     Construct the message list passed to the LLM.
     Injects ContextPackage blocks as the system message.
@@ -365,16 +384,29 @@ def _build_llm_messages(state: L1SupportState) -> list:
 
     messages = [SystemMessage(content=system_content)]
 
+    from core.orchestration.llm import get_llm_client
+    llm = get_llm_client()
+
     # Append conversation history (avoid re-adding the system prompt's session context)
     for msg in state.messages:
-        if isinstance(msg, (HumanMessage, AIMessage, ToolMessage)):
+        if isinstance(msg, (HumanMessage, AIMessage)):
+            content = msg.content
+            if state.locale != "en" and content:
+                content = await llm.translate_content(content, "en")
+            klass = HumanMessage if isinstance(msg, HumanMessage) else AIMessage
+            messages.append(klass(content=content))
+        elif isinstance(msg, ToolMessage):
+            # Tool messages are metadata and should not be translated
             messages.append(msg)
         elif isinstance(msg, dict):
             role = msg.get("role")
+            content = msg.get("content", "")
+            if state.locale != "en" and role in ("user", "assistant") and content:
+                content = await llm.translate_content(content, "en")
             if role == "user":
-                messages.append(HumanMessage(content=msg["content"]))
+                messages.append(HumanMessage(content=content))
             elif role == "assistant":
-                messages.append(AIMessage(content=msg["content"]))
+                messages.append(AIMessage(content=content))
 
     return messages
 
@@ -389,21 +421,30 @@ async def node_generate_response(state: L1SupportState) -> dict[str, Any]:
     """
     # Specialist response path — agent handled everything, return it verbatim
     if state.specialist_used and state.specialist_response:
-        response = AIMessage(content=state.specialist_response)
+        original_response = state.specialist_response
+        updates: dict[str, Any] = {
+            "resolution_attempts": state.resolution_attempts + 1,
+        }
+        if "[resolved]" in original_response.lower():
+            updates["current_resolution_id"] = (
+                state.context_package.intent.issue_type if state.context_package and state.context_package.intent else "specialist"
+            )
+
+        # Translate specialist response back to user native language if needed
+        if state.locale != "en" and original_response:
+            llm = get_llm_client()
+            translated_text = await llm.translate_content(original_response, state.locale)
+        else:
+            translated_text = original_response
+
+        response = AIMessage(content=translated_text)
+        updates["messages"] = [response]
         log.info(
             "response_from_specialist",
             session_id=state.session_id,
             agent=state.routed_to_agent,
+            locale=state.locale,
         )
-        # Specialists should signal resolution themselves — increment attempts conservatively
-        updates: dict[str, Any] = {
-            "messages": [response],
-            "resolution_attempts": state.resolution_attempts + 1,
-        }
-        if "[resolved]" in state.specialist_response.lower():
-            updates["current_resolution_id"] = (
-                state.context_package.intent.issue_type if state.context_package and state.context_package.intent else "specialist"
-            )
         return updates
 
     # Direct LLM path — specialist was not used or failed
@@ -432,7 +473,7 @@ async def node_generate_response(state: L1SupportState) -> dict[str, Any]:
     else:
         model_with_tools = lc_client
 
-    messages = _build_llm_messages(state)
+    messages = await _build_llm_messages(state)
 
     try:
         response = await model_with_tools.ainvoke(messages)
@@ -442,11 +483,17 @@ async def node_generate_response(state: L1SupportState) -> dict[str, Any]:
             content="I'm experiencing a technical issue. Let me connect you with a member of our team.",
         )
 
+    # Translate direct LLM response text back to user native language if there are no tool calls
+    if not getattr(response, "tool_calls", None) and state.locale != "en" and response.content:
+        translated_content = await llm.translate_content(response.content, state.locale)
+        response.content = translated_content
+
     log.info(
         "response_generated",
         session_id=state.session_id,
         agent=state.routed_to_agent,
         has_tool_calls=bool(getattr(response, "tool_calls", None)),
+        locale=state.locale,
     )
 
     updates = {"messages": [response]}
