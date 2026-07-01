@@ -112,45 +112,79 @@ def get_return_policy(
     If order_placed_at is given, fetch the policy that was active on that date.
     This is the core temporal-awareness feature of the system.
     """
-    _, graph = get_graph_client()
+    import redis
+    import json
+    from config import settings
+
     as_of = (order_placed_at or datetime.now(timezone.utc)).isoformat()
-    result = graph.query(
-        """
-        MATCH (b:Brand {id: $brand_id})-[hp:HAS_POLICY {type: 'return'}]->(p)
-        WHERE (p:ReturnPolicy OR p:Policy)
-        AND hp.effectiveDate <= $as_of
-        AND (p.expiry_date IS NULL OR p.expiry_date > $as_of)
-        RETURN p.return_window_days AS window_days,
-               p.return_cost_gbp AS cost_gbp,
-               p.return_cost_usd AS cost_usd,
-               p.free_return_condition AS free_condition,
-               p.excluded_categories AS excluded,
-               p.effective_date AS effective_date,
-               p.refund_timeline_days AS refund_timeline_days
-        ORDER BY hp.effectiveDate DESC
-        LIMIT 1
-        """,
-        {"brand_id": brand_id, "as_of": as_of},
-    )
-    rows = result.result_set if result and result.result_set else []
-    if not rows:
+    cache_key = f"policy_cache:return:{brand_id}:{as_of}"
+
+    r_client = None
+    try:
+        r_client = redis.from_url(settings.redis_url, decode_responses=True)
+    except Exception as exc:
+        log.warning("redis_connection_failed", error=str(exc))
+
+    try:
+        _, graph = get_graph_client()
+        result = graph.query(
+            """
+            MATCH (b:Brand {id: $brand_id})-[hp:HAS_POLICY {type: 'return'}]->(p)
+            WHERE (p:ReturnPolicy OR p:Policy)
+            AND hp.effectiveDate <= $as_of
+            AND (p.expiry_date IS NULL OR p.expiry_date > $as_of)
+            RETURN p.return_window_days AS window_days,
+                   p.return_cost_gbp AS cost_gbp,
+                   p.return_cost_usd AS cost_usd,
+                   p.free_return_condition AS free_condition,
+                   p.excluded_categories AS excluded,
+                   p.effective_date AS effective_date,
+                   p.refund_timeline_days AS refund_timeline_days
+            ORDER BY hp.effectiveDate DESC
+            LIMIT 1
+            """,
+            {"brand_id": brand_id, "as_of": as_of},
+        )
+        rows = result.result_set if result and result.result_set else []
+        if not rows:
+            return None
+        row = rows[0]
+        excluded = row[4]
+        if isinstance(excluded, str):
+            try:
+                excluded = json.loads(excluded.replace("'", '"'))
+            except Exception:
+                excluded = []
+        policy_data = {
+            "return_window_days": row[0],
+            "return_cost_gbp": row[1],
+            "return_cost_usd": row[2],
+            "free_return_condition": row[3],
+            "excluded_categories": excluded or [],
+            "effective_date": row[5],
+            "refund_timeline_days": row[6] if len(row) > 6 else 14,
+        }
+
+        # Write to cache
+        if r_client:
+            try:
+                r_client.setex(cache_key, 3600, json.dumps(policy_data))
+            except Exception as cache_err:
+                log.warning("write_policy_cache_failed", error=str(cache_err))
+
+        return policy_data
+    except Exception as db_exc:
+        log.warning("get_return_policy_db_failed_attempting_cache_failover", error=str(db_exc))
+        # Failover to Redis cache
+        if r_client:
+            try:
+                cached_raw = r_client.get(cache_key)
+                if cached_raw:
+                    log.info("policy_cache_failover_hit", brand_id=brand_id, type="return")
+                    return json.loads(cached_raw)
+            except Exception as cache_exc:
+                log.warning("read_policy_cache_failed", error=str(cache_exc))
         return None
-    row = rows[0]
-    excluded = row[4]
-    if isinstance(excluded, str):
-        try:
-            excluded = json.loads(excluded.replace("'", '"'))
-        except Exception:
-            excluded = []
-    return {
-        "return_window_days": row[0],
-        "return_cost_gbp": row[1],
-        "return_cost_usd": row[2],
-        "free_return_condition": row[3],
-        "excluded_categories": excluded or [],
-        "effective_date": row[5],
-        "refund_timeline_days": row[6] if len(row) > 6 else 14,
-    }
 
 
 def get_shipping_policy(
@@ -159,32 +193,70 @@ def get_shipping_policy(
     order_placed_at: datetime | None = None,
 ) -> dict[str, Any] | None:
     """Retrieve temporally-correct shipping policy for a brand+region."""
-    _, graph = get_graph_client()
+    import redis
+    import json
+    from config import settings
+
     as_of = (order_placed_at or datetime.now(timezone.utc)).isoformat()
-    result = graph.query(
-        """
-        MATCH (b:Brand {id: $brand_id})-[hp:HAS_POLICY {type: 'shipping', region: $region}]->(p)
-        WHERE (p:ShippingPolicy OR p:Policy)
-        AND hp.effectiveDate <= $as_of
-        AND (p.expiry_date IS NULL OR p.expiry_date > $as_of)
-        RETURN p.standard_days_min, p.standard_days_max, p.standard_cost,
-               p.express_available, p.express_days_max, p.express_cost,
-               p.free_shipping_threshold
-        ORDER BY hp.effectiveDate DESC
-        LIMIT 1
-        """,
-        {"brand_id": brand_id, "region": region, "as_of": as_of},
-    )
-    rows = result.result_set if result and result.result_set else []
-    if not rows:
+    cache_key = f"policy_cache:shipping:{brand_id}:{region}:{as_of}"
+
+    r_client = None
+    try:
+        r_client = redis.from_url(settings.redis_url, decode_responses=True)
+    except Exception as exc:
+        log.warning("redis_connection_failed", error=str(exc))
+
+    try:
+        _, graph = get_graph_client()
+        result = graph.query(
+            """
+            MATCH (b:Brand {id: $brand_id})-[hp:HAS_POLICY {type: 'shipping', region: $region}]->(p)
+            WHERE (p:ShippingPolicy OR p:Policy)
+            AND hp.effectiveDate <= $as_of
+            AND (p.expiry_date IS NULL OR p.expiry_date > $as_of)
+            RETURN p.standard_days_min, p.standard_days_max, p.standard_cost,
+                   p.express_available, p.express_days_max, p.express_cost,
+                   p.free_shipping_threshold
+            ORDER BY hp.effectiveDate DESC
+            LIMIT 1
+            """,
+            {"brand_id": brand_id, "region": region, "as_of": as_of},
+        )
+        rows = result.result_set if result and result.result_set else []
+        if not rows:
+            return None
+        row = rows[0]
+        policy_data = {
+            "standard_days_min": row[0],
+            "standard_days_max": row[1],
+            "standard_cost": row[2],
+            "express_available": row[3],
+            "express_days_max": row[4],
+            "express_cost": row[5],
+            "free_shipping_threshold": row[6],
+            "region": region,
+        }
+
+        # Write to cache
+        if r_client:
+            try:
+                r_client.setex(cache_key, 3600, json.dumps(policy_data))
+            except Exception as cache_err:
+                log.warning("write_policy_cache_failed", error=str(cache_err))
+
+        return policy_data
+    except Exception as db_exc:
+        log.warning("get_shipping_policy_db_failed_attempting_cache_failover", error=str(db_exc))
+        # Failover to Redis cache
+        if r_client:
+            try:
+                cached_raw = r_client.get(cache_key)
+                if cached_raw:
+                    log.info("policy_cache_failover_hit", brand_id=brand_id, type="shipping")
+                    return json.loads(cached_raw)
+            except Exception as cache_exc:
+                log.warning("read_policy_cache_failed", error=str(cache_exc))
         return None
-    row = rows[0]
-    return {
-        "standard_days_min": row[0], "standard_days_max": row[1],
-        "standard_cost": row[2], "express_available": row[3],
-        "express_days_max": row[4], "express_cost": row[5],
-        "free_shipping_threshold": row[6], "region": region,
-    }
 
 
 def get_brand_info(brand_id: str) -> dict[str, Any] | None:

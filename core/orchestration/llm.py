@@ -230,6 +230,29 @@ class LLMClient:
             log.warning("translation_failed", target_lang=target_lang, error=str(e))
         return text
 
+    async def self_heal_json(self, bad_json: str, error_msg: str) -> dict | None:
+        """
+        Attempt to self-heal malformed JSON using a lightweight reflection LLM call.
+        """
+        prompt = f"You produced the following text which was expected to be valid JSON, but failed parsing:\n{bad_json}\n\nThe parser returned the error:\n{error_msg}\n\nPlease clean and correct this JSON structure so that it is valid. Respond with ONLY the raw JSON object. Do not include any explanations, markdown code blocks, or chatter."
+        try:
+            res = await self.generate(
+                prompt=prompt,
+                system="You are a precise JSON corrector. Output ONLY valid JSON.",
+                fast=True,
+                max_tokens=512,
+            )
+            clean_res = res.strip()
+            if clean_res.startswith("```"):
+                lines = clean_res.split("\n")
+                if lines[0].startswith("```json") or lines[0].startswith("```"):
+                    clean_res = "\n".join(lines[1:-1]).strip()
+            import json
+            return json.loads(clean_res)
+        except Exception as e:
+            log.warning("json_self_healing_failed", error=str(e))
+        return None
+
     def get_lc_client(self, fast: bool = False):
         """LangChain-compatible client for LangGraph nodes with tool binding."""
         return _lc_client(fast=fast)

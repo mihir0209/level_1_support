@@ -89,27 +89,33 @@ async def classify_intent(
 
     try:
         data = json.loads(response.strip())
-        raw_category = data.get("category", "information")
-        try:
-            category = SupportCategory(raw_category)
-        except ValueError:
-            category = SupportCategory.INFORMATION
-        return IntentResult(
-            issue_type=data.get("issue_type", "unknown"),
-            confidence=float(data.get("confidence", 0.5)),
-            category=category,
-            entities=ExtractedEntities(
-                **{k: v for k, v in data.get("entities", {}).items() if v is not None},
-            ),
-        )
-    except (json.JSONDecodeError, ValueError) as e:
-        log.warning("intent_parse_failed", error=str(e), response=response[:200])
-        return IntentResult(
-            issue_type="unknown",
-            confidence=0.3,
-            category=SupportCategory.INFORMATION,
-            entities=ExtractedEntities(),
-        )
+    except Exception as e:
+        log.warning("intent_parse_failed_attempting_self_healing", error=str(e), response=response[:200])
+        healed = await llm_client.self_heal_json(response, str(e))
+        if healed:
+            data = healed
+        else:
+            return IntentResult(
+                issue_type="unknown",
+                confidence=0.3,
+                category=SupportCategory.INFORMATION,
+                entities=ExtractedEntities(),
+            )
+
+    raw_category = data.get("category", "information")
+    try:
+        category = SupportCategory(raw_category)
+    except ValueError:
+        category = SupportCategory.INFORMATION
+
+    return IntentResult(
+        issue_type=data.get("issue_type", "unknown"),
+        confidence=float(data.get("confidence", 0.5)),
+        category=category,
+        entities=ExtractedEntities(
+            **{k: v for k, v in data.get("entities", {}).items() if v is not None},
+        ),
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -75,6 +75,45 @@ class StatefulToolNode(RunnableCallable):
 
         return [tool_map[n] for n in manifest if n in tool_map]
 
+    async def _self_correct_tool_args(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        error_msg: str,
+        tool_schema: dict
+    ) -> dict | None:
+        """
+        Ask the LLM to reflect on incorrect tool arguments and output corrected arguments.
+        """
+        from core.orchestration.llm import get_llm_client
+        llm = get_llm_client()
+
+        prompt = (
+            f"You attempted to call the tool '{tool_name}' with the following arguments:\n"
+            f"{json.dumps(tool_args, indent=2)}\n\n"
+            f"However, execution failed with the error:\n"
+            f"{error_msg}\n\n"
+            f"The correct arguments schema for this tool is:\n"
+            f"{json.dumps(tool_schema, indent=2)}\n\n"
+            f"Please output the corrected JSON arguments matching the schema. Respond with ONLY the raw JSON object, do not include any markdown fences or explanation."
+        )
+        try:
+            res_text = await llm.generate(
+                prompt=prompt,
+                system="You are a precise JSON auto-corrector. Output ONLY valid JSON arguments.",
+                fast=True,
+                max_tokens=256,
+            )
+            clean_res = res_text.strip()
+            if clean_res.startswith("```"):
+                lines = clean_res.split("\n")
+                if lines[0].startswith("```json") or lines[0].startswith("```"):
+                    clean_res = "\n".join(lines[1:-1]).strip()
+            return json.loads(clean_res)
+        except Exception as e:
+            log.warning("tool_args_self_correction_failed", tool_name=tool_name, error=str(e))
+        return None
+
     def _sync_invoke(self, state: L1SupportState) -> dict[str, Any]:
         """Execute tool calls from the last AIMessage in state (sync entry point)."""
         available = self._resolve_tools(state)
@@ -105,7 +144,7 @@ class StatefulToolNode(RunnableCallable):
 
             try:
                 result = selected.invoke(tool_args)
-                content = result if isinstance(result, str) else str(result)
+                content = result if isinstance(result, str) else json.dumps(result) if isinstance(result, (dict, list)) else str(result)
             except Exception as exc:
                 content = f"Tool execution failed: {exc}"
 
@@ -118,10 +157,67 @@ class StatefulToolNode(RunnableCallable):
         return {"messages": tool_messages}
 
     async def _async_invoke(self, state: L1SupportState) -> dict[str, Any]:
-        """Async entry point — execute tools and sync to Chatwoot."""
-        res = self._sync_invoke(state)
-        tool_messages = res.get("messages", [])
-        
+        """Async entry point — execute tools, run self-healing retries, and sync to Chatwoot."""
+        available = self._resolve_tools(state)
+
+        last_ai: AIMessage | None = None
+        for msg in reversed(state.messages):
+            if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+                last_ai = msg
+                break
+
+        if not last_ai or not last_ai.tool_calls:
+            return {"messages": []}
+
+        tool_messages: list[ToolMessage] = []
+        for call in last_ai.tool_calls:
+            tool_name = call.get("name")
+            tool_args = call.get("args") or {}
+            tool_id = call.get("id", "")
+
+            selected = next((t for t in available if getattr(t, "name", "") == tool_name), None)
+            if not selected:
+                tool_messages.append(ToolMessage(
+                    content=f"Tool '{tool_name}' not found.",
+                    tool_call_id=tool_id,
+                    name=tool_name,
+                ))
+                continue
+
+            # First attempt
+            try:
+                if hasattr(selected, "ainvoke"):
+                    result = await selected.ainvoke(tool_args)
+                else:
+                    result = selected.invoke(tool_args)
+                content = result if isinstance(result, str) else json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+            except Exception as exc:
+                error_msg = str(exc)
+                log.warning("tool_execution_failed_attempting_self_healing", tool_name=tool_name, args=tool_args, error=error_msg)
+
+                # Fetch schema args
+                schema_args = getattr(selected, "args", {})
+                corrected_args = await self._self_correct_tool_args(tool_name, tool_args, error_msg, schema_args)
+
+                if corrected_args:
+                    log.info("tool_args_self_corrected", tool_name=tool_name, old_args=tool_args, corrected_args=corrected_args)
+                    try:
+                        if hasattr(selected, "ainvoke"):
+                            result = await selected.ainvoke(corrected_args)
+                        else:
+                            result = selected.invoke(corrected_args)
+                        content = result if isinstance(result, str) else json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+                    except Exception as retry_exc:
+                        content = f"Tool execution failed after self-correction retry: {retry_exc}"
+                else:
+                    content = f"Tool execution failed: {exc}"
+
+            tool_messages.append(ToolMessage(
+                content=content,
+                tool_call_id=tool_id,
+                name=tool_name,
+            ))
+
         if tool_messages:
             try:
                 from core.memory.session import get_session
@@ -135,8 +231,8 @@ class StatefulToolNode(RunnableCallable):
                             post_message(chatwoot_conv_id, note_content, private=True)
             except Exception as e:
                 log.warning("chatwoot_tool_sync_failed", error=str(e))
-                
-        return res
+
+        return {"messages": tool_messages}
 
 
 log = structlog.get_logger(__name__)
