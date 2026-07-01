@@ -64,4 +64,10 @@ class L1SupportState(BaseModel):
     satisfaction: float | None = None   # 0.0–1.0 CSAT score
     locale: str = "en"                  # Detected user language locale (e.g. 'en', 'es', 'fr')
 
+    # ── Human-in-the-Loop Action Approval ─────────────────────────────
+    pending_action: dict[str, Any] | None = None
+    human_approval: str | None = None   # approved | rejected | None
+    human_feedback: str | None = None
+    is_paused: bool = False
+
     model_config = ConfigDict(arbitrary_types_allowed=True)

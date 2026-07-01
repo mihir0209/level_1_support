@@ -184,6 +184,46 @@ class StatefulToolNode(RunnableCallable):
                 ))
                 continue
 
+            # Check if the tool is high-risk and requires human approval
+            is_high_risk = tool_name in ("return_init", "cancel_order", "order_cancel", "initiate_return")
+            if is_high_risk:
+                if state.human_approval is None:
+                    log.info("high_risk_tool_paused_awaiting_approval", tool_name=tool_name, args=tool_args)
+                    pending = {
+                        "tool_name": tool_name,
+                        "args": tool_args,
+                        "id": tool_id
+                    }
+                    tool_messages.append(ToolMessage(
+                        content=f"Action '{tool_name}' requires human authorization. Pausing execution.",
+                        tool_call_id=tool_id,
+                        name=tool_name,
+                    ))
+                    # PAUSE: Return updated messages, set pending_action and is_paused
+                    return {
+                        "messages": tool_messages,
+                        "pending_action": pending,
+                        "is_paused": True
+                    }
+                elif state.human_approval == "rejected":
+                    log.info("high_risk_tool_rejected_by_human", tool_name=tool_name, feedback=state.human_feedback)
+                    tool_messages.append(ToolMessage(
+                        content=f"Action rejected by support representative: {state.human_feedback or 'No feedback provided'}",
+                        tool_call_id=tool_id,
+                        name=tool_name,
+                    ))
+                    # Trigger escalation
+                    return {
+                        "messages": tool_messages,
+                        "outcome": SessionOutcome.ESCALATED,
+                        "escalation_reason": f"Action rejected: {state.human_feedback}",
+                        "pending_action": None,
+                        "human_approval": None,
+                        "is_paused": False
+                    }
+                elif state.human_approval == "approved":
+                    log.info("high_risk_tool_approved_executing", tool_name=tool_name)
+
             # First attempt
             try:
                 if hasattr(selected, "ainvoke"):
@@ -232,7 +272,13 @@ class StatefulToolNode(RunnableCallable):
             except Exception as e:
                 log.warning("chatwoot_tool_sync_failed", error=str(e))
 
-        return {"messages": tool_messages}
+        return {
+            "messages": tool_messages,
+            "pending_action": None,
+            "human_approval": None,
+            "human_feedback": None,
+            "is_paused": False
+        }
 
 
 log = structlog.get_logger(__name__)
@@ -386,6 +432,7 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
 
     agent_name = "supervisor_agent"
     try:
+        from core.agents.simple import HighRiskActionPaused, HighRiskActionRejected
         specialist = get_agent_for_intent(intent_id, state.brand_id)
         if hasattr(specialist, "name"):
             agent_name = specialist.name
@@ -395,6 +442,7 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
             brand_id=state.brand_id,
             customer_id=state.customer_id,
             intent_id=intent_id,
+            state=state,
         )
         log.info(
             "specialist_agent_ran",
@@ -407,6 +455,41 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
             "routed_to_agent": agent_name,
             "specialist_response": response,
             "specialist_used": True,
+            "is_paused": False,
+            "pending_action": None,
+            "human_approval": None,
+            "human_feedback": None,
+        }
+    except HighRiskActionPaused as pause_exc:
+        log.info("specialist_agent_paused_awaiting_approval", agent=agent_name, tool_name=pause_exc.tool_name)
+        from langchain_core.messages import ToolMessage
+        pause_msg = ToolMessage(
+            content=f"Action '{pause_exc.tool_name}' requires human authorization. Pausing execution.",
+            tool_call_id=pause_exc.tool_call_id,
+            name=pause_exc.tool_name,
+        )
+        pending = {
+            "tool_name": pause_exc.tool_name,
+            "args": pause_exc.tool_args,
+            "id": pause_exc.tool_call_id
+        }
+        return {
+            "messages": [pause_msg],
+            "specialist_response": f"Action {pause_exc.tool_name} requires human authorization. Pausing execution.",
+            "specialist_used": True,
+            "pending_action": pending,
+            "is_paused": True,
+        }
+    except HighRiskActionRejected as reject_exc:
+        log.info("specialist_agent_rejected_by_human", agent=agent_name, tool_name=reject_exc.tool_name)
+        return {
+            "specialist_response": f"Action rejected by support representative: {reject_exc.feedback or 'No feedback provided'}",
+            "specialist_used": True,
+            "outcome": SessionOutcome.ESCALATED,
+            "escalation_reason": f"Action rejected: {reject_exc.feedback}",
+            "pending_action": None,
+            "human_approval": None,
+            "is_paused": False,
         }
     except Exception as e:
         log.warning(

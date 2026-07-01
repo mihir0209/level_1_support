@@ -310,6 +310,8 @@ class ChatResponse(BaseModel):
     escalation_ticket: str | None = None
     turn_count: int = 0
     latency_ms: float = 0.0
+    is_paused: bool = False
+    pending_action: dict | None = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -658,6 +660,10 @@ async def chat(req: ChatRequest, request: Request = None):
         resolution_attempts=session_data.get("resolution_attempts", 0),
         is_resolved=session_data.get("is_resolved", False),
         customer=customer,
+        pending_action=session_data.get("pending_action"),
+        human_approval=session_data.get("human_approval"),
+        human_feedback=session_data.get("human_feedback"),
+        is_paused=session_data.get("is_paused", False),
     )
 
     # Run the graph
@@ -692,6 +698,10 @@ async def chat(req: ChatRequest, request: Request = None):
         "resolution_attempts": result_state.get("resolution_attempts", state.resolution_attempts),
         "is_resolved": is_resolved,
         "outcome": result_state.get("outcome").value if result_state.get("outcome") else None,
+        "pending_action": result_state.get("pending_action"),
+        "human_approval": result_state.get("human_approval"),
+        "human_feedback": result_state.get("human_feedback"),
+        "is_paused": result_state.get("is_paused", False),
     })
 
     latency_ms = (time.monotonic() - t_start) * 1000
@@ -710,6 +720,7 @@ async def chat(req: ChatRequest, request: Request = None):
         intent=intent_id,
         is_resolved=is_resolved,
         is_escalated=is_escalated,
+        is_paused=result_state.get("is_paused", False),
         latency_ms=round(latency_ms, 1),
     )
 
@@ -722,6 +733,129 @@ async def chat(req: ChatRequest, request: Request = None):
         escalation_ticket=escalation_ticket,
         turn_count=result_state.get("turn_count", 1),
         latency_ms=round(latency_ms, 1),
+        is_paused=result_state.get("is_paused", False),
+        pending_action=result_state.get("pending_action"),
+    )
+
+
+class ActionReviewRequest(BaseModel):
+    decision: str  # approved | rejected
+    feedback: str | None = None
+
+
+@app.post("/session/{session_id}/review", tags=["Chat"])
+async def review_action(session_id: str, req: ActionReviewRequest):
+    """
+    Submit a human agent decision (approve / reject) on a pending high-risk tool action.
+    Resumes graph execution and returns the next conversation turn.
+    """
+    if req.decision not in ("approved", "rejected"):
+        raise HTTPException(status_code=400, detail="Decision must be 'approved' or 'rejected'.")
+
+    # Load session
+    session_data = await get_session(session_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    if not session_data.get("is_paused") or not session_data.get("pending_action"):
+        raise HTTPException(status_code=400, detail="No pending action to review for this session.")
+
+    brand_id = session_data["brand_id"]
+    channel = Channel(session_data["channel"])
+
+    # Update session data with human review outcome to be loaded into the graph state
+    session_data["human_approval"] = req.decision
+    session_data["human_feedback"] = req.feedback
+
+    # We must construct history messages including the tool execution message that was generated when pausing
+    stored = session_data.get("messages", [])
+    history_messages = []
+    for m in stored:
+        if isinstance(m, dict):
+            if m.get("role") == "user":
+                history_messages.append(HumanMessage(content=m["content"]))
+            elif m.get("role") == "assistant":
+                history_messages.append(AIMessage(content=m["content"]))
+        else:
+            history_messages.append(m)
+
+    # Reconstruct the tool call mapping on the last AIMessage so LangGraph resumes execution correctly
+    last_msg = history_messages[-1] if history_messages else None
+    if isinstance(last_msg, AIMessage) and not getattr(last_msg, "tool_calls", None):
+        pending = session_data["pending_action"]
+        last_msg.tool_calls = [{
+            "name": pending["tool_name"],
+            "args": pending["args"],
+            "id": pending["id"]
+        }]
+
+    customer = get_mock_customer(session_data.get("customer_id"), brand_id)
+    state = L1SupportState(
+        session_id=session_id,
+        brand_id=brand_id,
+        channel=channel,
+        customer_id=session_data.get("customer_id"),
+        messages=history_messages,
+        turn_count=session_data.get("turn_count", 0),
+        resolution_attempts=session_data.get("resolution_attempts", 0),
+        is_resolved=session_data.get("is_resolved", False),
+        customer=customer,
+        pending_action=session_data["pending_action"],
+        human_approval=req.decision,
+        human_feedback=req.feedback,
+        is_paused=True,
+    )
+
+    t_start = time.monotonic()
+    graph = get_graph()
+    result_state = await graph.ainvoke(state)
+
+    ai_response = ""
+    escalation_ticket = None
+    for msg in reversed(result_state.get("messages", [])):
+        if hasattr(msg, "content") and not hasattr(msg, "tool_call_id"):
+            if isinstance(msg, (AIMessage,)):
+                ai_response = msg.content
+                break
+            elif isinstance(msg, dict) and msg.get("role") == "assistant":
+                ai_response = msg["content"]
+                break
+
+    is_escalated = result_state.get("outcome") == SessionOutcome.ESCALATED
+    is_resolved = result_state.get("outcome") == SessionOutcome.RESOLVED
+
+    # Persist updated session state
+    updated_messages = [
+        *(m.content if isinstance(m, (HumanMessage, AIMessage)) else m
+          for m in (session_data.get("messages", []) or [])),
+        {"role": "assistant", "content": ai_response},
+    ]
+    await update_session(session_id, {
+        "messages": updated_messages,
+        "turn_count": result_state.get("turn_count", state.turn_count + 1),
+        "resolution_attempts": result_state.get("resolution_attempts", state.resolution_attempts),
+        "is_resolved": is_resolved,
+        "outcome": result_state.get("outcome").value if result_state.get("outcome") else None,
+        "pending_action": result_state.get("pending_action"),
+        "human_approval": result_state.get("human_approval"),
+        "human_feedback": result_state.get("human_feedback"),
+        "is_paused": result_state.get("is_paused", False),
+    })
+
+    latency_ms = (time.monotonic() - t_start) * 1000
+    intent_id = result_state.get("intent").issue_type if result_state.get("intent") else None
+
+    return ChatResponse(
+        session_id=session_id,
+        response=ai_response or "Review processed.",
+        intent=intent_id,
+        is_resolved=is_resolved,
+        is_escalated=is_escalated,
+        escalation_ticket=escalation_ticket,
+        turn_count=result_state.get("turn_count", 1),
+        latency_ms=round(latency_ms, 1),
+        is_paused=result_state.get("is_paused", False),
+        pending_action=result_state.get("pending_action"),
     )
 
 

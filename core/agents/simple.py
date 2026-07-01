@@ -19,8 +19,24 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import BaseTool
 
 from core.orchestration.llm import get_llm_client
+from core.tracing import traced
 
 log = structlog.get_logger(__name__)
+
+
+class HighRiskActionPaused(Exception):
+    def __init__(self, tool_name: str, tool_args: dict, tool_call_id: str):
+        self.tool_name = tool_name
+        self.tool_args = tool_args
+        self.tool_call_id = tool_call_id
+        super().__init__(f"Action {tool_name} requires human approval.")
+
+
+class HighRiskActionRejected(Exception):
+    def __init__(self, tool_name: str, feedback: str | None = None):
+        self.tool_name = tool_name
+        self.feedback = feedback
+        super().__init__(f"Action {tool_name} was rejected: {feedback}")
 
 
 class SimpleAgent:
@@ -52,10 +68,8 @@ class SimpleAgent:
                 return t
         return None
 
-from core.tracing import traced
-
     @traced("agent.run")
-    async def run(self, task: str) -> str:
+    async def run(self, task: str, state: Any | None = None) -> str:
         """
         Execute the task through the LLM with tool binding.
 
@@ -97,6 +111,16 @@ from core.tracing import traced
                     args = call.get("args") or {}
                     tool_id = call.get("id", "")
 
+                    # Check if high-risk and requires human approval
+                    is_high_risk = name in ("return_init", "cancel_order", "order_cancel", "initiate_return")
+                    if is_high_risk and state is not None:
+                        if state.human_approval is None:
+                            raise HighRiskActionPaused(name, args, tool_id)
+                        elif state.human_approval == "rejected":
+                            raise HighRiskActionRejected(name, state.human_feedback)
+                        elif state.human_approval == "approved":
+                            log.info("agent_executing_approved_high_risk_tool", tool_name=name)
+
                     tool = self._tool_by_name(name)
                     if not tool:
                         tool_messages.append(ToolMessage(
@@ -124,6 +148,8 @@ from core.tracing import traced
                 messages.append(response)
                 messages.extend(tool_messages)
 
+            except (HighRiskActionPaused, HighRiskActionRejected):
+                raise
             except Exception as exc:
                 log.warning(
                     "simple_agent_loop_error",
@@ -197,6 +223,7 @@ async def run_specialist(
     brand_id: str,
     customer_id: str | None = None,
     intent_id: str | None = None,
+    state: Any | None = None,
 ) -> str:
     """
     Run a specialist agent on a task string.
@@ -257,7 +284,7 @@ async def run_specialist(
     full_task = f"{context_prefix}\n\n{task}"
 
     try:
-        result = await agent.run(full_task)
+        result = await agent.run(full_task, state=state)
         return str(result) if result else ""
     except Exception as exc:
         log.error("specialist_agent_failed", agent=agent.name, error=str(exc))
