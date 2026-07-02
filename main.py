@@ -1317,6 +1317,32 @@ async def kb_resolve_conflict(payload: ResolveConflictRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class ResetBreakerRequest(BaseModel):
+    tool_name: str
+
+
+@admin_router.get("/tools/circuit-breakers", tags=["Integrations"])
+async def get_tool_breakers():
+    """Retrieve failure counter and tripped statuses for all registered API tools."""
+    try:
+        from core.tools.circuit_breaker import get_all_breakers
+        breakers = await get_all_breakers()
+        return {"breakers": breakers}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/tools/circuit-breakers/reset", tags=["Integrations"])
+async def reset_tool_breaker_endpoint(payload: ResetBreakerRequest):
+    """Manually clear failure counter and restore tool breaker to Active status."""
+    try:
+        from core.tools.circuit_breaker import reset_tool_breaker
+        await reset_tool_breaker(payload.tool_name)
+        return {"status": "success", "tool_name": payload.tool_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Graph endpoints ───────────────────────────────────────────────────────────
 @admin_router.get("/graph/summary", tags=["Graph"])
 async def graph_summary():

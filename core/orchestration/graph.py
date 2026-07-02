@@ -175,6 +175,15 @@ class StatefulToolNode(RunnableCallable):
             tool_args = call.get("args") or {}
             tool_id = call.get("id", "")
 
+            from core.tools.circuit_breaker import is_tool_tripped
+            if await is_tool_tripped(tool_name):
+                tool_messages.append(ToolMessage(
+                    content=f"The processing system for {tool_name} is currently offline. Please try again later.",
+                    tool_call_id=tool_id,
+                    name=tool_name,
+                ))
+                continue
+
             selected = next((t for t in available if getattr(t, "name", "") == tool_name), None)
             if not selected:
                 tool_messages.append(ToolMessage(
@@ -238,6 +247,8 @@ class StatefulToolNode(RunnableCallable):
                 else:
                     result = selected.invoke(tool_args)
                 content = result if isinstance(result, str) else json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+                from core.tools.circuit_breaker import track_tool_success
+                await track_tool_success(tool_name)
             except Exception as exc:
                 error_msg = str(exc)
                 log.warning("tool_execution_failed_attempting_self_healing", tool_name=tool_name, args=tool_args, error=error_msg)
@@ -254,10 +265,16 @@ class StatefulToolNode(RunnableCallable):
                         else:
                             result = selected.invoke(corrected_args)
                         content = result if isinstance(result, str) else json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+                        from core.tools.circuit_breaker import track_tool_success
+                        await track_tool_success(tool_name)
                     except Exception as retry_exc:
                         content = f"Tool execution failed after self-correction retry: {retry_exc}"
+                        from core.tools.circuit_breaker import track_tool_failure
+                        await track_tool_failure(tool_name)
                 else:
                     content = f"Tool execution failed: {exc}"
+                    from core.tools.circuit_breaker import track_tool_failure
+                    await track_tool_failure(tool_name)
 
             tool_messages.append(ToolMessage(
                 content=content,
@@ -668,7 +685,18 @@ async def node_generate_response(state: L1SupportState) -> dict[str, Any]:
     lc_client = llm.get_lc_client(fast=False)
 
     available_tool_names = state.context_package.tool_manifest if state.context_package else []
-    available_tools = [t for name, t in TOOL_REGISTRY.items() if name in available_tool_names]
+    
+    # Filter out tripped tools from static registry
+    from core.tools.circuit_breaker import is_tool_tripped
+    filtered_static_tools = []
+    tripped_tool_notices = []
+    for name, t in TOOL_REGISTRY.items():
+        if name in available_tool_names:
+            if await is_tool_tripped(name):
+                tripped_tool_notices.append(name)
+            else:
+                filtered_static_tools.append(t)
+    available_tools = filtered_static_tools
 
     # Merge in dynamic brand-API tools; their names in the manifest are the base
     # spec names (e.g. "get_order") — dynamic tools are prefixed at binding time
@@ -682,7 +710,10 @@ async def node_generate_response(state: L1SupportState) -> dict[str, Any]:
             else:
                 stripped = base_name
             if stripped in available_tool_names or base_name in available_tool_names:
-                available_tools.append(dyn_t)
+                if await is_tool_tripped(base_name) or await is_tool_tripped(stripped):
+                    tripped_tool_notices.append(base_name)
+                else:
+                    available_tools.append(dyn_t)
 
     if available_tools:
         model_with_tools = lc_client.bind_tools(available_tools)
@@ -690,6 +721,14 @@ async def node_generate_response(state: L1SupportState) -> dict[str, Any]:
         model_with_tools = lc_client
 
     messages = await _build_llm_messages(state)
+    if tripped_tool_notices:
+        from langchain_core.messages import SystemMessage
+        offline_tools_str = ", ".join(tripped_tool_notices)
+        messages.append(SystemMessage(content=(
+            f"CRITICAL SYSTEM STATUS: The backend systems for the following tools are currently OFFLINE: {offline_tools_str}. "
+            "If the user asks for actions requiring these tools, politely explain that the system is currently "
+            "undergoing temporary maintenance and offer to escalate the ticket to a human representative."
+        )))
 
     try:
         response = await model_with_tools.ainvoke(messages)

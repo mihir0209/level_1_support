@@ -188,6 +188,7 @@ function app() {
     integrations: [],
     newInt: { name: '', url: '', description: '', type: 'mcp', authHeader: '' },
     intProbeResult: null,
+    toolBreakers: [],
 
     // ── VOICE ───────────────────────────────────────────────────
     voiceCalls: [],
@@ -870,6 +871,7 @@ function app() {
     async loadIntegrations() {
       try { const d = await this.api('/integrations/mcp'); this.integrations = d.integrations || []; }
       catch (_) { this.integrations = []; }
+      await this.loadToolBreakers();
     },
 
     async registerIntegration() {
@@ -906,6 +908,28 @@ function app() {
         this.toast('Removed: ' + name, 'toast-info');
         await this.loadIntegrations();
       } catch (e) { this.toast('Remove failed: ' + e.message, 'toast-error'); }
+    },
+
+    async loadToolBreakers() {
+      try {
+        const d = await this.api('/tools/circuit-breakers');
+        this.toolBreakers = d.breakers || [];
+      } catch (_) {
+        this.toolBreakers = [];
+      }
+    },
+
+    async resetToolBreaker(toolName) {
+      try {
+        await this.api('/tools/circuit-breakers/reset', {
+          method: 'POST',
+          body: JSON.stringify({ tool_name: toolName })
+        });
+        this.toast(`Circuit breaker for '${toolName}' successfully reset!`, 'toast-success');
+        await this.loadToolBreakers();
+      } catch (e) {
+        this.toast('Reset failed: ' + e.message, 'toast-error');
+      }
     },
 
     // ════════════════════════════════════════════════════════════════
