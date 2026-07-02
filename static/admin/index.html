@@ -2063,7 +2063,7 @@
 
       <div class="flex flex-wrap gap-2 mb-6">
         <template x-for="s in kbSubTabs" :key="s.id">
-          <button @click="kbTab=s.id"
+          <button @click="kbTab=s.id; if(s.id==='conflicts') loadKBConflicts()"
             :class="kbTab===s.id?'subtab-active':'subtab-inactive'"
             class="subtab" x-text="s.label"></button>
         </template>
@@ -2198,11 +2198,100 @@
         </div>
       </div>
 
+      <!-- Policy Conflict Audits -->
+      <div x-show="kbTab==='conflicts'" class="space-y-6">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
+          <!-- Policy Pre-flight Analyser Input -->
+          <div class="lg:col-span-1 bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 shadow-sm p-5 space-y-4">
+            <div>
+              <h3 class="text-sm font-semibold">Pre-Flight Policy Conflict Analyzer</h3>
+              <p class="text-xs text-surface-400 mt-0.5">Test a proposed policy draft against existing graph guidelines before importing.</p>
+            </div>
+            
+            <div class="space-y-3">
+              <label class="text-[10px] font-bold text-surface-400 uppercase tracking-wider block">Policy Text Draft</label>
+              <textarea x-model="newPolicyText" rows="6" placeholder="Paste return policy updates or shipping statements here..."
+                class="w-full text-xs rounded-lg border border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-900 px-3 py-2 text-surface-800 dark:text-surface-200 focus:outline-none focus:border-brand-500"></textarea>
+              
+              <button @click="runPolicyAnalysis()" :disabled="isAnalyzingPolicy"
+                class="w-full py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50">
+                <template x-if="isAnalyzingPolicy">
+                  <span class="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                </template>
+                <span x-text="isAnalyzingPolicy ? 'Analyzing Graph...' : 'Verify Policy'"></span>
+              </button>
+            </div>
+
+            <!-- Last verification results -->
+            <template x-if="newPolicyText.trim() && !isAnalyzingPolicy && analyzedConflicts !== null">
+              <div class="pt-3 border-t border-surface-100 dark:border-surface-700 space-y-2">
+                <span class="text-[10px] font-bold text-surface-400 uppercase tracking-wider block">Verification Report</span>
+                <template x-if="analyzedConflicts.length === 0">
+                  <div class="p-3 bg-green-50 text-green-700 dark:bg-green-950/20 dark:text-green-400 rounded-lg text-xs font-medium">
+                    ✔ Pre-flight OK: No contradictions detected.
+                  </div>
+                </template>
+                <template x-if="analyzedConflicts.length > 0">
+                  <div class="p-3 bg-red-50 text-red-700 dark:bg-red-950/20 dark:text-red-400 rounded-lg text-xs font-semibold">
+                    ⚠ Detected <span x-text="analyzedConflicts.length"></span> contradictions! Review details in active audit report.
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+
+          <!-- Active Conflict Logs List -->
+          <div class="lg:col-span-2 bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 shadow-sm p-6 space-y-4">
+            <div>
+              <h3 class="text-sm font-semibold">Ontological Conflict Audit Trail</h3>
+              <p class="text-xs text-surface-400 mt-0.5">Logical contradictions flagged by the Ontological verification engine.</p>
+            </div>
+            
+            <div class="space-y-4 max-h-[500px] overflow-y-auto pr-1">
+              <template x-if="!kbConflicts.length">
+                <div class="p-8 text-center text-surface-400 text-xs border border-dashed border-surface-200 dark:border-surface-700 rounded-xl">
+                  No active policy contradictions registered. Knowledge Base is verified and consistent.
+                </div>
+              </template>
+              <template x-for="c in kbConflicts" :key="c.id">
+                <div class="p-4 bg-surface-50 dark:bg-surface-900 rounded-xl border border-surface-200 dark:border-surface-700 space-y-3 shadow-sm hover:border-brand-300 dark:hover:border-brand-900 transition-colors">
+                  <div class="flex items-center justify-between flex-wrap gap-2">
+                    <div class="flex items-center gap-2">
+                      <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-red-50 text-red-700 dark:bg-red-950/20 dark:text-red-400" x-text="c.conflict_type"></span>
+                      <span class="text-xs font-bold capitalize text-surface-800 dark:text-surface-250" x-text="c.brand_id.replace('_', ' ')"></span>
+                    </div>
+                    <button @click="resolveKBConflict(c.id)" class="text-xs text-brand-600 hover:text-brand-700 font-semibold">
+                      Resolve & Dismiss
+                    </button>
+                  </div>
+                  
+                  <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                    <div class="bg-white dark:bg-surface-850 p-2.5 rounded-lg border border-surface-150 dark:border-surface-700/50">
+                      <span class="text-[9px] font-bold text-surface-400 uppercase tracking-wide block mb-1">Active Rule</span>
+                      <p class="text-surface-700 dark:text-surface-300 italic" x-text="c.existing_rule"></p>
+                    </div>
+                    <div class="bg-white dark:bg-surface-850 p-2.5 rounded-lg border border-surface-150 dark:border-surface-700/50">
+                      <span class="text-[9px] font-bold text-surface-400 uppercase tracking-wide block mb-1">Proposed Rule</span>
+                      <p class="text-surface-700 dark:text-surface-300 italic" x-text="c.proposed_rule"></p>
+                    </div>
+                  </div>
+                  <div class="text-xs bg-red-50/20 dark:bg-red-950/5 border-l-2 border-red-500 p-2.5 rounded-r">
+                    <span class="text-[9px] font-bold text-red-700 dark:text-red-400 uppercase tracking-wide block mb-0.5">Contradiction Explanation</span>
+                    <p class="text-surface-600 dark:text-surface-350 leading-relaxed" x-text="c.explanation"></p>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
     </div><!-- /kb -->
 
     <!-- ╔══════════════════════════════╗ -->
     <!-- ║  7 · ONTOLOGY                ║ -->
-    <!-- ╚══════════════════════════════╝ -->
     <div x-show="activeTab==='ontology'" x-init="loadOntology()" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
 
       <!-- Brand selector for brand-specific ontology view -->

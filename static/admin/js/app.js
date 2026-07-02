@@ -155,7 +155,12 @@ function app() {
       { id: 'faqs',    label: 'FAQs' },
       { id: 'policies', label: 'Policies' },
       { id: 'chunks',  label: 'pgvector Chunks' },
+      { id: 'conflicts', label: 'Policy Conflict Audits' },
     ],
+    kbConflicts: [],
+    newPolicyText: '',
+    analyzedConflicts: [],
+    isAnalyzingPolicy: false,
     kbBrandFilter: '',
     kbCategoryFilter: '',
     kbCategories: ['order','return','payment','delivery','account','promotions'],
@@ -761,6 +766,57 @@ function app() {
         this.kbChunks = d.chunks || [];
       } catch (e) { this.kbChunks = []; }
       finally { this.kbLoading = false; }
+    },
+
+    async loadKBConflicts() {
+      this.kbLoading = true;
+      try {
+        const d = await this.api('/admin/kb/conflicts');
+        this.kbConflicts = d.items || [];
+      } catch (e) {
+        this.toast('Failed to load policy conflicts: ' + e.message, 'toast-error');
+      } finally {
+        this.kbLoading = false;
+      }
+    },
+
+    async runPolicyAnalysis() {
+      if (!this.newPolicyText.trim()) return;
+      this.isAnalyzingPolicy = true;
+      this.analyzedConflicts = [];
+      try {
+        const d = await this.api('/admin/kb/analyze-policy', {
+          method: 'POST',
+          body: JSON.stringify({
+            brand_id: this.selectedBrand || 'boohoo_uk',
+            text: this.newPolicyText
+          })
+        });
+        this.analyzedConflicts = d.conflicts || [];
+        if (this.analyzedConflicts.length > 0) {
+          this.toast(`Detected ${this.analyzedConflicts.length} policy contradiction(s)! Check report below.`, 'toast-warning');
+        } else {
+          this.toast('No conflicts detected! The policy proposal is logically consistent.', 'toast-success');
+        }
+        await this.loadKBConflicts();
+      } catch (e) {
+        this.toast('Analysis failed: ' + e.message, 'toast-error');
+      } finally {
+        this.isAnalyzingPolicy = false;
+      }
+    },
+
+    async resolveKBConflict(conflictId) {
+      try {
+        await this.api('/admin/kb/resolve-conflict', {
+          method: 'POST',
+          body: JSON.stringify({ conflict_id: conflictId })
+        });
+        this.kbConflicts = this.kbConflicts.filter(c => c.id !== conflictId);
+        this.toast('Contradiction record resolved and archived!', 'toast-success');
+      } catch (e) {
+        this.toast('Failed to resolve: ' + e.message, 'toast-error');
+      }
     },
 
     // ════════════════════════════════════════════════════════════════

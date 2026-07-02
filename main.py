@@ -1241,6 +1241,67 @@ async def intent_performance():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class AnalyzePolicyRequest(BaseModel):
+    brand_id: str
+    text: str
+
+
+class ResolveConflictRequest(BaseModel):
+    conflict_id: str
+
+
+@admin_router.post("/kb/analyze-policy", tags=["Knowledge Base"])
+async def kb_analyze_policy(payload: AnalyzePolicyRequest):
+    """Analyze a new policy proposal against active policies in the graph for contradictions."""
+    try:
+        from core.knowledge.verifier import verify_policy_conflicts
+        conflicts = await verify_policy_conflicts(payload.brand_id, payload.text)
+        
+        # Save conflicts to Redis list so they persist in the admin dashboard
+        if conflicts:
+            from core.memory.session import get_redis
+            import json
+            import uuid
+            r = get_redis()
+            for c in conflicts:
+                cid = str(uuid.uuid4())
+                c["id"] = cid
+                c["brand_id"] = payload.brand_id
+                await r.hset("kb:conflicts", cid, json.dumps(c))
+                
+        return {"status": "success", "conflicts": conflicts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/kb/conflicts", tags=["Knowledge Base"])
+async def kb_list_conflicts():
+    """Retrieve all detected policy contradictions registered in Redis."""
+    try:
+        from core.memory.session import get_redis
+        import json
+        r = get_redis()
+        raw_conflicts = await r.hgetall("kb:conflicts")
+        conflicts = []
+        for cid, val in raw_conflicts.items():
+            conflicts.append(json.loads(val))
+        return {"count": len(conflicts), "items": conflicts}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/kb/resolve-conflict", tags=["Knowledge Base"])
+async def kb_resolve_conflict(payload: ResolveConflictRequest):
+    """Remove a resolved contradiction record from Redis."""
+    try:
+        from core.memory.session import get_redis
+        r = get_redis()
+        await r.hdel("kb:conflicts", payload.conflict_id)
+        return {"status": "success", "resolved_id": payload.conflict_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Graph endpoints ───────────────────────────────────────────────────────────
 @admin_router.get("/graph/summary", tags=["Graph"])
 async def graph_summary():
