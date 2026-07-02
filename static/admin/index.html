@@ -2084,6 +2084,56 @@
         </div>
       </div>
 
+      <!-- Pending Graph Enrichments Review Queue -->
+      <div class="mt-6 bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 shadow-sm">
+        <div class="px-4 py-3 border-b border-surface-100 dark:border-surface-700 flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-semibold">Self-Enriched Graph Projections</h3>
+            <p class="text-xs text-surface-400 mt-0.5">Direct relationships discovered from successful customer sessions. Pending verification.</p>
+          </div>
+          <button @click="loadGraphEnrichments()" class="text-xs text-brand-600 font-semibold">Refresh Queue</button>
+        </div>
+        <div class="p-4 space-y-4">
+          <template x-if="!pendingEnrichments.length">
+            <div class="p-8 text-center text-surface-400 text-xs border border-dashed border-surface-200 dark:border-surface-700 rounded-xl">
+              No pending graph enrichments discovered. The graph is fully aligned.
+            </div>
+          </template>
+          
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <template x-for="e in pendingEnrichments" :key="e.id">
+              <div class="p-4 bg-surface-50 dark:bg-surface-900 border border-surface-200 dark:border-surface-700 rounded-xl flex flex-col justify-between space-y-3 hover:border-brand-300 transition-colors shadow-sm">
+                <div class="space-y-1 text-xs">
+                  <div class="flex items-center justify-between">
+                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-50 text-purple-700 dark:bg-purple-950/20 dark:text-purple-400 uppercase tracking-wider">
+                      Proposed Fact
+                    </span>
+                    <span class="text-[10px] text-surface-400 truncate max-w-[120px]" x-text="'Session: ' + e.session_id"></span>
+                  </div>
+                  <p class="text-surface-700 dark:text-surface-200 leading-relaxed font-medium" x-text="e.explanation"></p>
+                </div>
+                
+                <div class="bg-white dark:bg-surface-850 p-2.5 rounded-lg border border-surface-150 dark:border-surface-700/50">
+                  <span class="text-[9px] font-bold text-surface-450 uppercase tracking-wide block mb-1">Cypher Query Preview</span>
+                  <code class="mono text-[10px] text-brand-600 dark:text-brand-400 block whitespace-pre-wrap leading-tight" x-text="e.cypher_query"></code>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-2">
+                  <button @click="approveEnrichment(e.id)"
+                    class="py-1.5 bg-brand-600 hover:bg-brand-700 text-white rounded text-xs font-semibold shadow-xs transition-colors">
+                    Approve Fact
+                  </button>
+                  <button @click="rejectEnrichment(e.id)"
+                    class="py-1.5 bg-surface-200 hover:bg-surface-300 dark:bg-surface-700 dark:hover:bg-surface-600 text-surface-750 dark:text-surface-250 rounded text-xs font-semibold transition-colors">
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
     </div><!-- /graph -->
 
     <!-- ╔══════════════════════════════╗ -->

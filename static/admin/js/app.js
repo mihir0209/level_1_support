@@ -150,6 +150,7 @@ function app() {
       { label: 'Entity types',      query: "CALL db.labels() YIELD label RETURN label ORDER BY label" },
     ],
     graphIssues: [],
+    pendingEnrichments: [],
 
     // ── KB ───────────────────────────────────────────────────────
     kbTab: 'faqs',
@@ -731,6 +732,42 @@ function app() {
     async loadIssues() {
       try { const d = await this.api('/admin/graph/issues'); this.graphIssues = d.issues || []; }
       catch (e) { this.graphIssues = []; }
+      await this.loadGraphEnrichments();
+    },
+
+    async loadGraphEnrichments() {
+      try {
+        const d = await this.api('/graph/enrichments');
+        this.pendingEnrichments = d.items || [];
+      } catch (_) {
+        this.pendingEnrichments = [];
+      }
+    },
+
+    async approveEnrichment(enrichmentId) {
+      try {
+        await this.api('/graph/enrichments/approve', {
+          method: 'POST',
+          body: JSON.stringify({ enrichment_id: enrichmentId })
+        });
+        this.toast('Graph enrichment proposal approved and written to FalkorDB!', 'toast-success');
+        await this.loadGraphEnrichments();
+      } catch (e) {
+        this.toast('Approval failed: ' + e.message, 'toast-error');
+      }
+    },
+
+    async rejectEnrichment(enrichmentId) {
+      try {
+        await this.api('/graph/enrichments/reject', {
+          method: 'POST',
+          body: JSON.stringify({ enrichment_id: enrichmentId })
+        });
+        this.toast('Graph enrichment proposal dismissed.', 'toast-info');
+        await this.loadGraphEnrichments();
+      } catch (e) {
+        this.toast('Rejection failed: ' + e.message, 'toast-error');
+      }
     },
 
     // ════════════════════════════════════════════════════════════════

@@ -821,6 +821,16 @@ async def chat(req: ChatRequest, request: Request = None):
         if is_resolved:
             from core.orchestration.rl_engine import register_feedback
             await register_feedback("empathy_mode", empathy_mode, 1)
+
+            # ── Online Live KG Fact Enrichment loop ──
+            from core.ontology.enricher import extract_and_propose_facts
+            import asyncio
+            asyncio.create_task(extract_and_propose_facts(
+                session_id=req.session_id,
+                brand_id=brand_id,
+                messages=updated_messages
+            ))
+
             await update_session(req.session_id, {"rl_feedback_registered": True})
         elif is_escalated:
             from core.orchestration.rl_engine import register_feedback
@@ -1377,6 +1387,43 @@ async def reset_rl_stats_endpoint(category: str = "empathy_mode"):
     try:
         from core.orchestration.rl_engine import reset_arm_stats
         await reset_arm_stats(category)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class EnrichmentActionRequest(BaseModel):
+    enrichment_id: str
+
+
+@admin_router.get("/graph/enrichments", tags=["Graph"])
+async def get_graph_enrichments():
+    """Retrieve all dynamically discovered facts waiting for supervisor approval."""
+    try:
+        from core.ontology.enricher import get_pending_enrichments
+        enrichments = await get_pending_enrichments()
+        return {"count": len(enrichments), "items": enrichments}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/graph/enrichments/approve", tags=["Graph"])
+async def approve_graph_enrichment_endpoint(payload: EnrichmentActionRequest):
+    """Execute Cypher query and save proposed fact node to FalkorDB."""
+    try:
+        from core.ontology.enricher import approve_enrichment
+        success = await approve_enrichment(payload.enrichment_id)
+        return {"status": "success", "approved": success}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/graph/enrichments/reject", tags=["Graph"])
+async def reject_graph_enrichment_endpoint(payload: EnrichmentActionRequest):
+    """Dismiss and remove proposed fact node from the review queue."""
+    try:
+        from core.ontology.enricher import reject_enrichment
+        await reject_enrichment(payload.enrichment_id)
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
