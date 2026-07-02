@@ -296,15 +296,43 @@
 
             <!-- Input -->
             <div class="p-4 border-t border-surface-100 dark:border-surface-700">
+              <!-- Inline Action Approval Request Card -->
+              <template x-if="lastResponse && lastResponse.is_paused">
+                <div class="bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/50 rounded-xl p-4 mb-4 space-y-3 slide-enter">
+                  <div class="flex justify-between items-center">
+                    <span class="text-xs font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                      <svg class="w-4 h-4 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                      Authorization Required
+                    </span>
+                    <span class="text-[10px] mono text-amber-600 dark:text-amber-400" x-text="'Proposed: ' + lastResponse.pending_action.tool_name"></span>
+                  </div>
+                  <pre class="bg-white dark:bg-surface-900 p-3 rounded-lg text-[11px] font-mono border border-amber-100 dark:border-amber-950/50 text-surface-800 dark:text-surface-200" x-text="JSON.stringify(lastResponse.pending_action.args, null, 2)"></pre>
+                  
+                  <div class="space-y-1.5">
+                    <label class="text-[11px] font-medium text-amber-950 dark:text-amber-300 block">Supervisor Rationale</label>
+                    <textarea x-model="approvalFeedback" rows="2" placeholder="Provide reason for approval or rejection..." class="w-full text-xs bg-white dark:bg-surface-900 border border-amber-200 dark:border-amber-800/85 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-amber-500 text-surface-900 dark:text-white placeholder-amber-600/40 dark:placeholder-amber-400/30"></textarea>
+                  </div>
+
+                  <div class="flex justify-end gap-2 pt-1 border-t border-amber-200/50 dark:border-amber-900/30">
+                    <button @click="submitChatApproval('rejected')" :disabled="isLoading" class="px-3 py-1.5 text-xs font-semibold text-red-600 dark:text-red-400 bg-white dark:bg-surface-800 hover:bg-red-50 dark:hover:bg-red-950/10 border border-red-200 dark:border-red-900/40 rounded-lg transition-all">
+                      Reject
+                    </button>
+                    <button @click="submitChatApproval('approved')" :disabled="isLoading" class="px-3 py-1.5 text-xs font-semibold text-white bg-green-600 hover:bg-green-700 dark:bg-green-500 dark:hover:bg-green-600 rounded-lg transition-all">
+                      Approve & Execute
+                    </button>
+                  </div>
+                </div>
+              </template>
+
               <form @submit.prevent="sendMessage()" class="flex gap-3">
                 <textarea x-model="chatInput"
                   @keydown.enter.exact.prevent="sendMessage()"
                   placeholder="Describe your issue… (e.g. 'Where is my order?')"
                   rows="1"
                   class="flex-1 resize-none rounded-xl border border-surface-200 dark:border-surface-600 bg-surface-50 dark:bg-surface-900 px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 placeholder:text-surface-300 disabled:opacity-50"
-                  :disabled="!currentSession||isLoading"></textarea>
+                  :disabled="!currentSession||isLoading||(lastResponse && lastResponse.is_paused)"></textarea>
                 <button type="submit"
-                  :disabled="!chatInput.trim()||!currentSession||isLoading"
+                  :disabled="!chatInput.trim()||!currentSession||isLoading||(lastResponse && lastResponse.is_paused)"
                   class="self-end px-4 py-3 bg-brand-600 hover:bg-brand-700 disabled:bg-surface-200 text-white rounded-xl text-sm font-medium transition-colors flex items-center gap-2">
                   <svg x-show="!isLoading" class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
@@ -315,7 +343,7 @@
               <div class="mt-2 flex flex-wrap gap-2">
                 <template x-for="c in quickChips" :key="c.text">
                   <button @click="sendQuick(c.text)"
-                    :disabled="!currentSession||isLoading"
+                    :disabled="!currentSession||isLoading||(lastResponse && lastResponse.is_paused)"
                     class="text-xs px-2.5 py-1 rounded-full border border-surface-200 dark:border-surface-600 hover:border-brand-400 hover:text-brand-600 dark:hover:text-brand-400 transition-colors disabled:opacity-40"
                     x-text="c.text"></button>
                 </template>
@@ -946,6 +974,130 @@
         </div>
       </div>
     </div><!-- /review -->
+
+
+    <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  ACTION APPROVALS            ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='action_approvals'" x-init="loadPendingApprovals()" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        
+        <!-- Left Pane: Approvals List (4 cols) -->
+        <div class="lg:col-span-4 flex flex-col space-y-4">
+          <div class="flex justify-between items-center bg-white dark:bg-surface-800 p-4 rounded-xl shadow-sm border border-surface-200 dark:border-surface-700">
+            <div>
+              <h2 class="text-sm font-semibold text-surface-900 dark:text-white">Pending approvals</h2>
+              <p class="text-xs text-surface-500 dark:text-surface-400">Review pending high-risk write tasks</p>
+            </div>
+            <button @click="loadPendingApprovals()" class="p-1.5 rounded-lg hover:bg-surface-100 dark:hover:bg-surface-700 text-surface-500 hover:text-surface-700 dark:hover:text-surface-300">
+              <svg class="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 1121.21 7.89M9 11l3 3L22 4" /></svg>
+            </button>
+          </div>
+
+          <!-- Loading state -->
+          <div x-show="approvalLoading && !pendingApprovals.length" class="space-y-3">
+            <template x-for="n in 3">
+              <div class="animate-pulse bg-white dark:bg-surface-800 p-4 rounded-xl border border-surface-200 dark:border-surface-700 space-y-2">
+                <div class="h-4 bg-surface-200 dark:bg-surface-700 rounded w-1/3"></div>
+                <div class="h-3 bg-surface-200 dark:bg-surface-700 rounded w-2/3"></div>
+                <div class="h-3 bg-surface-200 dark:bg-surface-700 rounded w-1/2"></div>
+              </div>
+            </template>
+          </div>
+
+          <!-- Empty state -->
+          <div x-show="!approvalLoading && !pendingApprovals.length" class="text-center py-12 bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
+            <svg class="mx-auto h-8 w-8 text-surface-400 dark:text-surface-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <h3 class="mt-2 text-xs font-semibold text-surface-900 dark:text-white">All clear</h3>
+            <p class="text-xs text-surface-500 dark:text-surface-400 mt-1">No actions currently require human approval.</p>
+          </div>
+
+          <!-- List cards -->
+          <div class="space-y-3" x-show="pendingApprovals.length">
+            <template x-for="item in pendingApprovals" :key="item.session_id">
+              <div @click="selectApproval(item)"
+                :class="selectedApproval && selectedApproval.session_id === item.session_id ? 'border-brand-500 dark:border-brand-500 bg-brand-50/50 dark:bg-brand-950/20' : 'border-surface-200 dark:border-surface-700 bg-white dark:bg-surface-800 hover:border-surface-300 dark:hover:border-surface-600'"
+                class="cursor-pointer p-4 rounded-xl border transition-all duration-200">
+                <div class="flex justify-between items-start">
+                  <span class="px-2 py-0.5 text-[10px] font-medium rounded-full bg-brand-100 text-brand-800 dark:bg-brand-900/50 dark:text-brand-300" x-text="item.brand_id"></span>
+                  <span class="text-[10px] text-surface-400 dark:text-surface-500" x-text="item.channel"></span>
+                </div>
+                <h4 class="text-xs font-semibold text-surface-950 dark:text-white mt-2" x-text="'Tool: ' + item.pending_action.tool_name"></h4>
+                <p class="text-[11px] text-surface-500 dark:text-surface-400 mt-1 truncate" x-text="'Session: ...' + item.session_id.substring(item.session_id.length - 8)"></p>
+                <div class="flex justify-between items-center text-[10px] text-surface-400 dark:text-surface-500 mt-3 pt-2 border-t border-surface-100 dark:border-surface-800">
+                  <span x-text="'Turns: ' + item.turn_count"></span>
+                  <span x-text="item.customer_id ? 'Cust: ' + item.customer_id : 'Guest'"></span>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Right Pane: Approval Editor & Inspector (8 cols) -->
+        <div class="lg:col-span-8 flex flex-col bg-white dark:bg-surface-800 rounded-xl shadow-sm border border-surface-200 dark:border-surface-700 min-h-[400px]">
+          
+          <!-- Empty detail view -->
+          <div x-show="!selectedApproval" class="flex-1 flex flex-col items-center justify-center text-center p-8">
+            <svg class="h-10 w-10 text-surface-300 dark:text-surface-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122" />
+            </svg>
+            <h3 class="mt-2 text-xs font-medium text-surface-900 dark:text-white">Inspect Action Request</h3>
+            <p class="text-xs text-surface-500 dark:text-surface-400 mt-1 max-w-xs">Select an action request from the list to view proposed parameters, review instructions, and decide.</p>
+          </div>
+
+          <!-- Active editor -->
+          <div x-show="selectedApproval" class="flex-1 flex flex-col">
+            <!-- Header -->
+            <div class="p-6 border-b border-surface-200 dark:border-surface-700 flex justify-between items-center">
+              <div>
+                <h3 class="text-sm font-semibold text-surface-900 dark:text-white" x-text="'Review ' + (selectedApproval ? selectedApproval.pending_action.tool_name : '')"></h3>
+                <p class="text-xs text-surface-500 dark:text-surface-400 mt-0.5" x-text="'Session: ' + (selectedApproval ? selectedApproval.session_id : '')"></p>
+              </div>
+              <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">Awaiting Decision</span>
+            </div>
+
+            <!-- Content inspector -->
+            <div class="p-6 flex-1 space-y-6">
+              <div>
+                <span class="text-xs font-medium text-surface-400 uppercase tracking-wider block mb-2">Proposed Parameters</span>
+                <pre class="bg-surface-50 dark:bg-surface-900 p-4 rounded-xl text-xs font-mono border border-surface-150 dark:border-surface-800 text-surface-800 dark:text-surface-200 max-h-48 overflow-y-auto" x-text="selectedApproval ? JSON.stringify(selectedApproval.pending_action.args, null, 2) : ''"></pre>
+              </div>
+
+              <!-- Context Details -->
+              <div class="grid grid-cols-2 gap-4 bg-surface-50/50 dark:bg-surface-900/50 p-4 rounded-xl border border-surface-100 dark:border-surface-800">
+                <div>
+                  <span class="text-[10px] text-surface-400 dark:text-surface-500 uppercase tracking-wider block">Customer ID</span>
+                  <span class="text-xs font-medium text-surface-900 dark:text-white" x-text="selectedApproval ? (selectedApproval.customer_id || 'Guest') : ''"></span>
+                </div>
+                <div>
+                  <span class="text-[10px] text-surface-400 dark:text-surface-500 uppercase tracking-wider block">Channel</span>
+                  <span class="text-xs font-medium text-surface-900 dark:text-white" x-text="selectedApproval ? selectedApproval.channel : ''"></span>
+                </div>
+              </div>
+
+              <!-- Feedback / Review comments -->
+              <div class="space-y-2">
+                <label class="text-xs font-medium text-surface-700 dark:text-surface-300 block">Review Feedback / Rationale</label>
+                <textarea x-model="approvalFeedback" rows="3" placeholder="Explain the rationale for approval or reasons for rejection (this will be logged and analyzed)..." class="w-full text-xs bg-white dark:bg-surface-900 border border-surface-250 dark:border-surface-700 rounded-xl px-3 py-2 text-surface-900 dark:text-white placeholder-surface-400 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500"></textarea>
+              </div>
+            </div>
+
+            <!-- Footer: Review buttons -->
+            <div class="p-6 border-t border-surface-200 dark:border-surface-700 flex justify-end gap-3 bg-surface-50 dark:bg-surface-900/30 rounded-b-xl">
+              <button @click="submitApprovalDecision(selectedApproval.session_id, 'rejected')" :disabled="approvalLoading" class="px-4 py-2 text-xs font-semibold text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/20 hover:bg-red-100 dark:hover:bg-red-950/40 border border-red-200 dark:border-red-900/50 rounded-lg transition-all">
+                Reject Action
+              </button>
+              <button @click="submitApprovalDecision(selectedApproval.session_id, 'approved')" :disabled="approvalLoading" class="px-4 py-2 text-xs font-semibold text-white bg-green-600 hover:bg-green-700 dark:bg-green-500 dark:hover:bg-green-600 rounded-lg shadow-sm transition-all">
+                Approve & Execute
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div><!-- /action_approvals -->
 
     <!-- ╔══════════════════════════════╗ -->
     <!-- ║  3 · MONITORING               ║ -->

@@ -41,7 +41,7 @@ from prometheus_client import Counter, Histogram, generate_latest
 
 from brands.registry import resolve_brand, BRAND_REGISTRY
 from config import settings
-from core.memory.session import create_session, get_session, update_session
+from core.memory.session import create_session, get_session, update_session, get_all_paused_sessions
 from core.ontology.models import Channel, Customer, CustomerTier, Order, OrderItem, OrderStatus, Shipment
 from core.orchestration.graph import get_graph
 from core.orchestration.state import L1SupportState
@@ -762,6 +762,27 @@ async def review_action(session_id: str, req: ActionReviewRequest):
 
     brand_id = session_data["brand_id"]
     channel = Channel(session_data["channel"])
+    pending = session_data["pending_action"]
+
+    # Record Prometheus metrics
+    try:
+        from core.metrics import APPROVAL_DECISIONS_TOTAL, APPROVAL_LATENCY_SECONDS
+        APPROVAL_DECISIONS_TOTAL.labels(
+            brand_id=brand_id,
+            tool_name=pending.get("tool_name", "unknown"),
+            decision=req.decision
+        ).inc()
+
+        paused_at = pending.get("paused_at")
+        if paused_at:
+            lat = time.time() - float(paused_at)
+            APPROVAL_LATENCY_SECONDS.labels(
+                brand_id=brand_id,
+                tool_name=pending.get("tool_name", "unknown"),
+                decision=req.decision
+            ).observe(lat)
+    except Exception as m_err:
+        log.warning("review_action_metrics_failed", error=str(m_err))
 
     # Update session data with human review outcome to be loaded into the graph state
     session_data["human_approval"] = req.decision
@@ -1026,6 +1047,17 @@ from pydantic import BaseModel
 from core.middleware.auth import verify_admin_key
 
 admin_router = APIRouter(prefix="/admin", dependencies=[Depends(verify_admin_key)])
+
+
+@admin_router.get("/pending-approvals", tags=["Approvals"])
+async def pending_approvals():
+    """Retrieve all support sessions currently paused awaiting supervisor review."""
+    try:
+        paused = await get_all_paused_sessions()
+        return {"count": len(paused), "items": paused}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ── Graph endpoints ───────────────────────────────────────────────────────────
 @admin_router.get("/graph/summary", tags=["Graph"])

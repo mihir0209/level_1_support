@@ -127,6 +127,38 @@ async def update_session(session_id: str, updates: dict[str, Any]) -> None:
     await mem.save(current)
 
 
+async def get_all_paused_sessions() -> list[dict[str, Any]]:
+    """Scan all session keys and return those currently paused awaiting HITL approval."""
+    paused = []
+    try:
+        r = get_redis()
+        # Scan Redis keys matching session:*
+        async for key in r.scan_iter("session:*"):
+            raw = await r.get(key)
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    if data.get("is_paused") is True and data.get("pending_action"):
+                        paused.append(data)
+                except Exception:
+                    pass
+    except Exception as exc:
+        log.warning("redis_scan_failed_using_in_memory", error=str(exc))
+
+    # Incorporate in-memory sessions
+    for key, raw in _IN_MEMORY_SESSIONS.items():
+        if key.startswith("session:"):
+            try:
+                data = json.loads(raw)
+                if data.get("is_paused") is True and data.get("pending_action"):
+                    # Avoid duplicates if they were already fetched from Redis
+                    if not any(p["session_id"] == data["session_id"] for p in paused):
+                        paused.append(data)
+            except Exception:
+                pass
+    return paused
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # TIER 2 + TIER 3 — imported from dedicated modules
 # ═══════════════════════════════════════════════════════════════════════════
@@ -139,6 +171,7 @@ __all__ = [
     "create_session",
     "get_session",
     "update_session",
+    "get_all_paused_sessions",
     "MemPalaceClient",
     "mempalace",
     "GraphitiMemory",

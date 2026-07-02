@@ -189,10 +189,17 @@ class StatefulToolNode(RunnableCallable):
             if is_high_risk:
                 if state.human_approval is None:
                     log.info("high_risk_tool_paused_awaiting_approval", tool_name=tool_name, args=tool_args)
+                    from core.metrics import APPROVAL_REQUESTS_TOTAL
+                    APPROVAL_REQUESTS_TOTAL.labels(
+                        brand_id=state.brand_id or "unknown",
+                        tool_name=tool_name
+                    ).inc()
+                    import time
                     pending = {
                         "tool_name": tool_name,
                         "args": tool_args,
-                        "id": tool_id
+                        "id": tool_id,
+                        "paused_at": time.time()
                     }
                     tool_messages.append(ToolMessage(
                         content=f"Action '{tool_name}' requires human authorization. Pausing execution.",
@@ -462,16 +469,23 @@ async def node_route_to_agent(state: L1SupportState) -> dict[str, Any]:
         }
     except HighRiskActionPaused as pause_exc:
         log.info("specialist_agent_paused_awaiting_approval", agent=agent_name, tool_name=pause_exc.tool_name)
+        from core.metrics import APPROVAL_REQUESTS_TOTAL
+        APPROVAL_REQUESTS_TOTAL.labels(
+            brand_id=state.brand_id or "unknown",
+            tool_name=pause_exc.tool_name
+        ).inc()
         from langchain_core.messages import ToolMessage
         pause_msg = ToolMessage(
             content=f"Action '{pause_exc.tool_name}' requires human authorization. Pausing execution.",
             tool_call_id=pause_exc.tool_call_id,
             name=pause_exc.tool_name,
         )
+        import time
         pending = {
             "tool_name": pause_exc.tool_name,
             "args": pause_exc.tool_args,
-            "id": pause_exc.tool_call_id
+            "id": pause_exc.tool_call_id,
+            "paused_at": time.time()
         }
         return {
             "messages": [pause_msg],

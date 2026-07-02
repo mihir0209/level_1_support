@@ -29,6 +29,7 @@ function app() {
       { id: 'demo',         label: 'Support Demo' },
       { id: 'sessions',     label: 'Sessions' },
       { id: 'review',       label: 'Review Queue' },
+      { id: 'action_approvals', label: 'Action Approvals' },
       { id: 'monitoring',  label: 'Monitoring' },
       { id: 'brands',       label: 'Brands' },
       { id: 'graph',        label: 'Graph' },
@@ -208,6 +209,11 @@ function app() {
       const base = window.location.pathname.split('/').filter(Boolean).slice(0, 2).join('/');
       const url = '/' + (tabId === 'demo' ? base : base + '/' + tabId);
       history.pushState({}, '', url);
+      if (tabId === 'action_approvals') {
+        this.loadPendingApprovals();
+      } else if (tabId === 'review') {
+        this.loadReviewQueue();
+      }
     },
 
     syncFromUrl() {
@@ -215,6 +221,11 @@ function app() {
       const tab = parts[2];
       if (tab && this.navTabs.find(t => t.id === tab)) {
         this.activeTab = tab;
+        if (tab === 'action_approvals') {
+          this.loadPendingApprovals();
+        } else if (tab === 'review') {
+          this.loadReviewQueue();
+        }
       } else {
         this.activeTab = 'demo';
       }
@@ -368,6 +379,54 @@ function app() {
     },
 
     async sendQuick(text) { this.chatInput = text; await this.sendMessage(); },
+
+    async submitChatApproval(decision) {
+      if (!this.lastResponse || !this.lastResponse.session_id) return;
+      this.isLoading = true;
+      try {
+        const payload = {
+          decision: decision,
+          feedback: this.approvalFeedback || null
+        };
+        const data = await this.api(`/session/${this.lastResponse.session_id}/review`, {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        
+        // Add a message indicating the decision
+        this.messages.push({
+          role: 'system',
+          title: `Action review: ${decision.toUpperCase()}`,
+          content: this.approvalFeedback ? `Feedback: "${this.approvalFeedback}"` : 'No feedback provided.',
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        });
+        
+        // Set the response
+        this.lastResponse = data;
+        
+        // Add agent response to message log
+        if (data.response) {
+          this.messages.push({
+            role: 'agent',
+            content: data.response,
+            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          });
+        }
+        
+        // Reload session status
+        if (this.currentSession && this.currentSession.session_id === data.session_id) {
+          this.currentSession.outcome = data.is_resolved ? 'resolved' : data.is_escalated ? 'escalated' : null;
+          this.currentSession.turn_count = data.turn_count;
+        }
+        this.approvalFeedback = '';
+        this.toast(`Action ${decision} successfully!`, 'toast-success');
+      } catch (e) {
+        this.toast('Failed to submit approval: ' + e.message, 'toast-error');
+      } finally {
+        this.isLoading = false;
+        this.$nextTick(() => { const el = document.getElementById('chat-bottom'); if (el) el.scrollIntoView({ behavior: 'smooth' }); });
+      }
+    },
 
     resetDemo() {
       this.currentSession = null; this.messages = []; this.lastResponse = null;
@@ -896,6 +955,63 @@ function app() {
         this.toast('Update failed: ' + e.message, 'toast-error');
       } finally {
         this.reviewLoading = false;
+      }
+    },
+
+
+    // ACTION APPROVALS
+    // ════════════════════════════════════════════════════════════════
+    pendingApprovals: [],
+    selectedApproval: null,
+    approvalFeedback: '',
+    approvalLoading: false,
+
+    async loadPendingApprovals() {
+      this.approvalLoading = true;
+      try {
+        const data = await this.api('/admin/pending-approvals');
+        this.pendingApprovals = data.items || [];
+        
+        // Auto select first item if none selected and items are available
+        if (this.pendingApprovals.length && !this.selectedApproval) {
+          this.selectApproval(this.pendingApprovals[0]);
+        } else if (!this.pendingApprovals.length) {
+          this.selectedApproval = null;
+        }
+      } catch (e) {
+        this.toast('Failed to load pending approvals: ' + e.message, 'toast-error');
+      } finally {
+        this.approvalLoading = false;
+      }
+    },
+
+    selectApproval(appr) {
+      this.selectedApproval = appr;
+      this.approvalFeedback = '';
+    },
+
+    async submitApprovalDecision(session_id, decision) {
+      this.approvalLoading = true;
+      try {
+        const payload = {
+          decision: decision,
+          feedback: this.approvalFeedback || null
+        };
+        await this.api(`/session/${session_id}/review`, {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        this.toast(`Action ${decision} successfully!`, 'toast-success');
+        this.selectedApproval = null;
+        await this.loadPendingApprovals();
+        // If we are currently viewing this session in the demo chat, reload it
+        if (this.currentSession === session_id) {
+          await this.loadSession(session_id);
+        }
+      } catch (e) {
+        this.toast('Failed to submit decision: ' + e.message, 'toast-error');
+      } finally {
+        this.approvalLoading = false;
       }
     },
   };
