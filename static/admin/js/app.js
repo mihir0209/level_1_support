@@ -37,6 +37,7 @@ function app() {
       { id: 'kb',            label: 'Knowledge Base' },
       { id: 'ontology',      label: 'Ontology' },
       { id: 'integrations',  label: 'Integrations' },
+      { id: 'rl',            label: 'Reinforcement Learning' },
       { id: 'voice',         label: 'Voice' },
     ],
 
@@ -195,6 +196,7 @@ function app() {
     voiceBrand: 'boohoo_uk',
     voiceLoading: false,
     voiceResult: null,
+    rlStats: [],
 
     // ════════════════════════════════════════════════════════════════
     // LIFECYCLE
@@ -205,6 +207,7 @@ function app() {
       await this.loadBrands();
       await this.checkHealth();
       this.refreshMonitoring();
+      await this.loadRLStats();
       setInterval(() => this.refreshMonitoring(), 15000);
       window.addEventListener('popstate', () => this.syncFromUrl());
     },
@@ -951,6 +954,26 @@ function app() {
         await this.loadVoiceCalls();
       } catch (e) { this.toast('Voice call failed: ' + e.message, 'toast-error'); }
       finally { this.voiceLoading = false; }
+    },
+
+    // ── REINFORCEMENT LEARNING ────────────────────────────────────
+    async loadRLStats() {
+      try {
+        const d = await this.api('/rl/stats');
+        this.rlStats = d.stats || [];
+      } catch (_) {
+        this.rlStats = [];
+      }
+    },
+
+    async resetRLStats() {
+      try {
+        await this.api('/rl/reset', { method: 'POST' });
+        this.toast('RL statistics reset to uniform Beta priors!', 'toast-success');
+        await this.loadRLStats();
+      } catch (e) {
+        this.toast('Reset failed: ' + e.message, 'toast-error');
+      }
     },
 
     // ════════════════════════════════════════════════════════════════

@@ -2672,6 +2672,89 @@
     </div><!-- /integrations -->
 
     <!-- ╔══════════════════════════════╗ -->
+    <!-- ║  8b · REINFORCEMENT LEARNING   ║ -->
+    <!-- ╚══════════════════════════════╝ -->
+    <div x-show="activeTab==='rl'" x-init="loadRLStats()" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">
+      
+      <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 shadow-sm p-6 space-y-6">
+        <div class="flex items-center justify-between flex-wrap gap-4 border-b border-surface-100 dark:border-surface-700 pb-4">
+          <div>
+            <h2 class="text-lg font-bold">Online Reinforcement Learning Alignment</h2>
+            <p class="text-xs text-surface-400 mt-1">Zero-cost Bayesian alignment of support agent prompt strategies using Thompson Sampling.</p>
+          </div>
+          <div class="flex items-center gap-3">
+            <button @click="loadRLStats()" class="px-3 py-1.5 bg-surface-100 hover:bg-surface-200 text-surface-700 rounded-lg text-xs font-semibold shadow-sm transition-colors">
+              Refresh Stats
+            </button>
+            <button @click="resetRLStats()" class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors">
+              Reset Distributions
+            </button>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <!-- Description of the Online RL cycle -->
+          <div class="lg:col-span-1 bg-surface-55/30 dark:bg-surface-900/40 p-5 rounded-xl border border-surface-150 dark:border-surface-800 space-y-4">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-surface-500">How Truly Live RL Works</h3>
+            <div class="space-y-3 text-xs leading-relaxed text-surface-600 dark:text-surface-350">
+              <p>
+                <strong>1. Selection via Thompson Sampling</strong>: 
+                Every new support session samples from a local Bayesian Beta distribution for each variation. The system deploys the mode with the highest drawn sample probability.
+              </p>
+              <p>
+                <strong>2. Feedback Collection</strong>: 
+                If the session successfully resolves without escalation or operator takeover, it logs a <strong>positive (+1) reward</strong>. If the session requires intervention, a <strong>negative (0) reward</strong> is recorded.
+              </p>
+              <p>
+                <strong>3. Real-Time Parameters Update</strong>: 
+                Positive feedback increases &alpha; (Alpha), shifting the distribution peak right. Failure increases &beta; (Beta), shifting the peak left.
+              </p>
+              <p class="text-[11px] text-brand-600 dark:text-brand-400 font-semibold bg-brand-50/50 dark:bg-brand-950/10 p-2.5 rounded border border-brand-100 dark:border-brand-900/50">
+                💡 Cursor-style feedback loops are local and 100% free &mdash; optimization runs on CPU in-memory with zero cloud training billing.
+              </p>
+            </div>
+          </div>
+
+          <!-- MAB Variant Status Table -->
+          <div class="lg:col-span-2 space-y-4">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-surface-500">MAB Optimization variant: Empathy Mode</h3>
+            
+            <div class="overflow-x-auto rounded-lg border border-surface-200 dark:border-surface-700">
+              <table class="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr class="bg-surface-50 dark:bg-surface-900 text-surface-450 border-b border-surface-200 dark:border-surface-700">
+                    <th class="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">Variant Arm</th>
+                    <th class="px-4 py-3 font-semibold uppercase tracking-wider text-[10px] text-center">Success (&alpha;)</th>
+                    <th class="px-4 py-3 font-semibold uppercase tracking-wider text-[10px] text-center">Failure (&beta;)</th>
+                    <th class="px-4 py-3 font-semibold uppercase tracking-wider text-[10px] text-center">Total Trials</th>
+                    <th class="px-4 py-3 font-semibold uppercase tracking-wider text-[10px] text-right">Expected Win Rate</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-surface-150 dark:divide-surface-750">
+                  <template x-for="s in rlStats" :key="s.arm_name">
+                    <tr class="hover:bg-surface-50/50 dark:hover:bg-surface-900/20 transition-colors">
+                      <td class="px-4 py-3.5 font-bold text-surface-850 dark:text-surface-200 capitalize" x-text="s.arm_name"></td>
+                      <td class="px-4 py-3.5 text-center mono font-medium text-green-600 dark:text-green-400" x-text="s.alpha"></td>
+                      <td class="px-4 py-3.5 text-center mono font-medium text-red-500" x-text="s.beta"></td>
+                      <td class="px-4 py-3.5 text-center text-surface-450" x-text="s.trials"></td>
+                      <td class="px-4 py-3.5 text-right font-semibold text-brand-600 dark:text-brand-400" x-text="(s.expected_win_rate * 100).toFixed(1) + '%'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            
+            <div class="p-4 bg-yellow-50/20 dark:bg-yellow-950/5 border-l-2 border-yellow-500 rounded-r text-xs text-surface-650 dark:text-surface-300">
+              📌 The system initializes all arms at uniform Beta(1,1) priors representing complete uncertainty. As traffic runs, the expected win rate converges on the true performance of each prompt variant.
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </div><!-- /rl -->
+
+    <!-- ╔══════════════════════════════╗ -->
     <!-- ║  9 · VOICE                   ║ -->
     <!-- ╚══════════════════════════════╝ -->
     <div x-show="activeTab==='voice'" class="slide-enter max-w-screen-xl mx-auto px-4 py-6">

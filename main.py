@@ -709,6 +709,12 @@ async def chat(req: ChatRequest, request: Request = None):
     from core.orchestration.coordinator import decompose_compound_request
     tasks = await decompose_compound_request(req.message)
 
+    # 3. Resolve Empathy Mode arm via Thompson Sampling MAB if not set
+    empathy_mode = req.empathy_mode or session_data.get("empathy_mode")
+    if not empathy_mode:
+        from core.orchestration.rl_engine import select_best_arm
+        empathy_mode = await select_best_arm("empathy_mode")
+
     # Fetch customer (Phase 1: mock; Phase 2: real API)
     customer = get_mock_customer(
         req.customer_id or session_data.get("customer_id"),
@@ -742,7 +748,7 @@ async def chat(req: ChatRequest, request: Request = None):
         human_approval=session_data.get("human_approval"),
         human_feedback=session_data.get("human_feedback"),
         is_paused=session_data.get("is_paused", False),
-        empathy_mode=req.empathy_mode or session_data.get("empathy_mode", "professional"),
+        empathy_mode=empathy_mode,
         compliance_score=session_data.get("compliance_score", 1.0),
         compliance_violations=session_data.get("compliance_violations"),
         is_takeover=False,
@@ -801,7 +807,7 @@ async def chat(req: ChatRequest, request: Request = None):
         "human_approval": result_state.get("human_approval"),
         "human_feedback": result_state.get("human_feedback"),
         "is_paused": result_state.get("is_paused", False),
-        "empathy_mode": result_state.get("empathy_mode", "professional"),
+        "empathy_mode": empathy_mode,
         "compliance_score": result_state.get("compliance_score", 1.0),
         "compliance_violations": result_state.get("compliance_violations"),
         "current_sentiment": sentiment,
@@ -809,6 +815,17 @@ async def chat(req: ChatRequest, request: Request = None):
         "escalation_risk": risk_score,
         "sub_tasks": tasks,
     })
+
+    # ── Online Live RL Feedback Registration ──────────────────────────
+    if not session_data.get("rl_feedback_registered"):
+        if is_resolved:
+            from core.orchestration.rl_engine import register_feedback
+            await register_feedback("empathy_mode", empathy_mode, 1)
+            await update_session(req.session_id, {"rl_feedback_registered": True})
+        elif is_escalated:
+            from core.orchestration.rl_engine import register_feedback
+            await register_feedback("empathy_mode", empathy_mode, 0)
+            await update_session(req.session_id, {"rl_feedback_registered": True})
 
     latency_ms = (time.monotonic() - t_start) * 1000
     MESSAGES_TOTAL.labels(brand_id=brand_id, channel=channel.value).inc()
@@ -1339,6 +1356,28 @@ async def reset_tool_breaker_endpoint(payload: ResetBreakerRequest):
         from core.tools.circuit_breaker import reset_tool_breaker
         await reset_tool_breaker(payload.tool_name)
         return {"status": "success", "tool_name": payload.tool_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/rl/stats", tags=["Reinforcement Learning"])
+async def get_rl_stats(category: str = "empathy_mode"):
+    """Retrieve parameter statistics for prompt variation arms."""
+    try:
+        from core.orchestration.rl_engine import get_all_arm_stats
+        stats = await get_all_arm_stats(category)
+        return {"stats": stats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/rl/reset", tags=["Reinforcement Learning"])
+async def reset_rl_stats_endpoint(category: str = "empathy_mode"):
+    """Reset statistics for variants back to uniform priors."""
+    try:
+        from core.orchestration.rl_engine import reset_arm_stats
+        await reset_arm_stats(category)
+        return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -2049,6 +2088,13 @@ async def toggle_session_takeover(session_id: str, payload: TakeoverRequest):
     if not session_data:
         raise HTTPException(status_code=404, detail="Session not found.")
     
+    # Log negative RL feedback on live operator takeover
+    if payload.is_takeover and not session_data.get("rl_feedback_registered"):
+        empathy_mode = session_data.get("empathy_mode", "professional")
+        from core.orchestration.rl_engine import register_feedback
+        await register_feedback("empathy_mode", empathy_mode, 0)
+        session_data["rl_feedback_registered"] = True
+
     session_data["is_takeover"] = payload.is_takeover
     await update_session(session_id, session_data)
     return {"status": "success", "is_takeover": payload.is_takeover}
@@ -2064,6 +2110,13 @@ async def intercept_session_message(session_id: str, payload: InterceptRequest):
     updated_messages = session_data.get("messages", [])
     updated_messages.append({"role": "assistant", "content": payload.message})
     
+    # Log negative RL feedback on live operator interception
+    if not session_data.get("rl_feedback_registered"):
+        empathy_mode = session_data.get("empathy_mode", "professional")
+        from core.orchestration.rl_engine import register_feedback
+        await register_feedback("empathy_mode", empathy_mode, 0)
+        session_data["rl_feedback_registered"] = True
+
     session_data["messages"] = updated_messages
     session_data["is_takeover"] = True  # Automatically locks into takeover mode on intercept
     await update_session(session_id, session_data)
