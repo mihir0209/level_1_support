@@ -299,6 +299,7 @@ class ChatRequest(BaseModel):
     session_id: str
     message: str
     customer_id: str | None = None
+    empathy_mode: str | None = "professional"
 
 
 class ChatResponse(BaseModel):
@@ -312,6 +313,7 @@ class ChatResponse(BaseModel):
     latency_ms: float = 0.0
     is_paused: bool = False
     pending_action: dict | None = None
+    current_sentiment: str = "neutral"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -568,6 +570,25 @@ async def new_session(req: NewSessionRequest):
     )
 
 
+def analyze_sentiment(message: str) -> str:
+    """Analyze user message text and return a sentiment category: happy | neutral | frustrated."""
+    msg = message.lower()
+    frustrated_words = [
+        "disappointed", "angry", "terrible", "worst", "hate", "useless", "broken",
+        "annoyed", "frustrated", "delay", "poor", "unhappy", "awful", "horrible",
+        "slow", "charge", "fail", "not happy", "refund now", "cancel"
+    ]
+    happy_words = [
+        "thank", "perfect", "great", "awesome", "love", "wonderful", "solved",
+        "excellent", "appreciate", "helpful", "good", "happy"
+    ]
+    if any(w in msg for w in frustrated_words):
+        return "frustrated"
+    if any(w in msg for w in happy_words):
+        return "happy"
+    return "neutral"
+
+
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
 async def chat(req: ChatRequest, request: Request = None):
     """
@@ -623,6 +644,9 @@ async def chat(req: ChatRequest, request: Request = None):
                 detail="Potential prompt injection detected."
             )
 
+    # Analyze user sentiment
+    sentiment = analyze_sentiment(req.message)
+
     # Load session
     session_data = await get_session(req.session_id)
     if not session_data:
@@ -664,6 +688,9 @@ async def chat(req: ChatRequest, request: Request = None):
         human_approval=session_data.get("human_approval"),
         human_feedback=session_data.get("human_feedback"),
         is_paused=session_data.get("is_paused", False),
+        empathy_mode=req.empathy_mode or session_data.get("empathy_mode", "professional"),
+        compliance_score=session_data.get("compliance_score", 1.0),
+        compliance_violations=session_data.get("compliance_violations"),
     )
 
     # Run the graph
@@ -702,6 +729,10 @@ async def chat(req: ChatRequest, request: Request = None):
         "human_approval": result_state.get("human_approval"),
         "human_feedback": result_state.get("human_feedback"),
         "is_paused": result_state.get("is_paused", False),
+        "empathy_mode": result_state.get("empathy_mode", "professional"),
+        "compliance_score": result_state.get("compliance_score", 1.0),
+        "compliance_violations": result_state.get("compliance_violations"),
+        "current_sentiment": sentiment,
     })
 
     latency_ms = (time.monotonic() - t_start) * 1000
@@ -735,6 +766,7 @@ async def chat(req: ChatRequest, request: Request = None):
         latency_ms=round(latency_ms, 1),
         is_paused=result_state.get("is_paused", False),
         pending_action=result_state.get("pending_action"),
+        current_sentiment=sentiment,
     )
 
 
@@ -1065,6 +1097,83 @@ async def audit_logs(limit: int = 50, offset: int = 0, brand_id: str | None = No
     try:
         from feedback.engine import get_all_audit_logs
         return get_all_audit_logs(limit=limit, offset=offset, brand_id=brand_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/customers/{customer_id}/stats", tags=["Customers"])
+async def customer_stats(customer_id: str):
+    """Retrieve customer's lifetime support performance statistics."""
+    try:
+        from feedback.engine import _get_db_conn
+        conn = _get_db_conn()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT AVG(satisfaction), COUNT(*), COUNT(CASE WHEN outcome = 'resolved' THEN 1 END), COUNT(CASE WHEN outcome = 'escalated' THEN 1 END)
+                    FROM support_sessions
+                    WHERE customer_id = %s
+                """, (customer_id,))
+                row = cur.fetchone()
+                
+                avg_csat = row[0] if row and row[0] is not None else 1.0
+                total = row[1] if row else 0
+                resolved = row[2] if row else 0
+                escalated = row[3] if row else 0
+                
+                return {
+                    "avg_csat": f"{avg_csat:.1f}/1.0" if avg_csat else "N/A",
+                    "history": f"{total} sessions ({resolved} resolved, {escalated} escalated)"
+                }
+    except Exception as e:
+        log.warning("customer_stats_failed", customer_id=customer_id, error=str(e))
+        return {"avg_csat": "N/A", "history": "0 sessions"}
+
+
+@admin_router.get("/analytics/intent-performance", tags=["Analytics"])
+async def intent_performance():
+    """Retrieve aggregation metrics for intent performance across Postgres and FalkorDB."""
+    try:
+        from feedback.engine import _get_db_conn
+        conn = _get_db_conn()
+        postgres_stats = []
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT intent, COALESCE(AVG(satisfaction), 1.0), COUNT(*), 
+                           COUNT(CASE WHEN outcome = 'resolved' THEN 1 END), 
+                           COUNT(CASE WHEN outcome = 'escalated' THEN 1 END)
+                    FROM support_sessions
+                    WHERE intent IS NOT NULL
+                    GROUP BY intent
+                """)
+                rows = cur.fetchall()
+                for r in rows:
+                    total = r[2]
+                    escalated = r[4]
+                    escalation_rate = (escalated / total) * 100 if total > 0 else 0.0
+                    postgres_stats.append({
+                        "intent": r[0],
+                        "avg_csat": round(r[1], 2),
+                        "total_sessions": total,
+                        "resolved_count": r[3],
+                        "escalated_count": escalated,
+                        "escalation_rate": round(escalation_rate, 1)
+                    })
+
+        # Query FalkorDB
+        kg_resolutions = []
+        try:
+            _, graph = get_graph_client()
+            result = graph.query("MATCH (r:Resolution) RETURN r.name, r.success_rate ORDER BY r.success_rate DESC LIMIT 10")
+            kg_resolutions = [{"name": r[0], "success_rate": round(r[1] or 0.0, 2)} for r in result.result_set if r[0]]
+        except Exception as kg_err:
+            log.warning("analytics_kg_query_failed", error=str(kg_err))
+
+        return {
+            "postgres_intents": postgres_stats,
+            "kg_resolutions": kg_resolutions
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

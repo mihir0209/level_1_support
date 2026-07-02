@@ -74,4 +74,7 @@ class L1SupportState(BaseModel):
     compliance_score: float = 1.0
     compliance_violations: str | None = None
 
+    # ── Empathy Persona & Styling ──────────────────────────────────────
+    empathy_mode: str = "professional"
+
     model_config = ConfigDict(arbitrary_types_allowed=True)

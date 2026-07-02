@@ -52,6 +52,10 @@ function app() {
     isLoading: false,
     lastResponse: null,
     customerContext: null,
+    currentSentiment: 'neutral',
+    customerCSAT: 'N/A',
+    customerHistory: '0 sessions',
+    empathyMode: 'professional',
 
     flowSteps: [
       { label: 'Intent Classification', desc: 'Fast model classifies query type', done: false, active: false },
@@ -100,8 +104,11 @@ function app() {
     monSubTabs: [
       { id: 'overview', label: 'System Overview' },
       { id: 'jobs',      label: 'Ingestion Jobs' },
+      { id: 'analytics', label: 'KG & Intent Analytics' },
     ],
     ingestionJobs: [],
+    intentAnalytics: { postgres_intents: [], kg_resolutions: [] },
+    analyticsLoading: false,
 
     // ── BRANDS ──────────────────────────────────────────────────
     brandTab: 'list',
@@ -350,11 +357,26 @@ function app() {
     },
 
     async loadCustomerContext() {
-      if (!this.selectedCustomer) { this.customerContext = null; return; }
+      if (!this.selectedCustomer) {
+        this.customerContext = null;
+        this.currentSentiment = 'neutral';
+        this.customerCSAT = 'N/A';
+        this.customerHistory = '0 sessions';
+        return;
+      }
       try {
         const d = await this.api('/api/v1/customers/' + this.selectedCustomer);
         this.customerContext = d;
-      } catch (_) { this.customerContext = null; }
+        
+        // Fetch customer session history statistics
+        const stats = await this.api('/admin/customers/' + this.selectedCustomer + '/stats');
+        this.customerCSAT = stats.avg_csat || 'N/A';
+        this.customerHistory = stats.history || '0 sessions';
+      } catch (_) {
+        this.customerContext = null;
+        this.customerCSAT = 'N/A';
+        this.customerHistory = '0 sessions';
+      }
     },
 
     async sendMessage() {
@@ -367,9 +389,15 @@ function app() {
       try {
         const data = await this.api('/chat', {
           method: 'POST',
-          body: JSON.stringify({ session_id: this.currentSession.session_id, message: msg, customer_id: this.selectedCustomer || null }),
+          body: JSON.stringify({
+            session_id: this.currentSession.session_id,
+            message: msg,
+            customer_id: this.selectedCustomer || null,
+            empathy_mode: this.empathyMode
+          }),
         });
         this.lastResponse = data;
+        this.currentSentiment = data.current_sentiment || 'neutral';
         this.messages.push({ role: 'agent', content: data.response, intent: data.intent, time: new Date().toLocaleTimeString() });
         this.activateFlow(4);
         if (data.is_resolved) { this.markFlowDone(5); }
@@ -432,6 +460,10 @@ function app() {
     resetDemo() {
       this.currentSession = null; this.messages = []; this.lastResponse = null;
       this.customerContext = null; this.customers = []; this.resetFlow();
+    },
+
+    updateEmpathyMode() {
+      this.toast(`Persona updated to ${this.empathyMode}!`, 'toast-success');
     },
 
     resetFlow() { this.flowSteps.forEach(s => { s.done = false; s.active = false; }); },
@@ -1068,6 +1100,18 @@ function app() {
       if (!isoString) return '';
       const d = new Date(isoString);
       return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    },
+
+    async loadIntentAnalytics() {
+      this.analyticsLoading = true;
+      try {
+        const data = await this.api('/admin/analytics/intent-performance');
+        this.intentAnalytics = data || { postgres_intents: [], kg_resolutions: [] };
+      } catch (e) {
+        this.toast('Failed to load intent analytics: ' + e.message, 'toast-error');
+      } finally {
+        this.analyticsLoading = false;
+      }
     },
   };
 }

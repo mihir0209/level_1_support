@@ -543,9 +543,32 @@ async def _build_llm_messages(state: L1SupportState) -> list:
             if stripped not in manifest_names and name not in manifest_names:
                 manifest_names.append(stripped)
 
+    # Build agent persona guidelines based on empathy mode setting
+    persona_block = ""
+    if state.empathy_mode == "apologetic":
+        persona_block = (
+            "AGENT PERSONA (APOLOGETIC):\n"
+            "  - Tone: Warm, highly empathetic, and deeply apologetic.\n"
+            "  - Directives: Explicitly apologize for any customer inconvenience or delays (e.g. 'I am so sorry for this difficulty'). Use friendly, reassuring language."
+        )
+    elif state.empathy_mode == "concise":
+        persona_block = (
+            "AGENT PERSONA (CONCISE):\n"
+            "  - Tone: Direct and minimalist.\n"
+            "  - Directives: State answers briefly. Use bullet points for steps. Eliminate all conversational filler, chatty preambles, and excessive apologies."
+        )
+    else: # professional
+        persona_block = (
+            "AGENT PERSONA (PROFESSIONAL):\n"
+            "  - Tone: Formal, polite, structured, and objective.\n"
+            "  - Directives: Focus on policy clarity and step-by-step guidance. Be helpful and polite without over-apologizing."
+        )
+
     # Build structured system message from ContextPackage blocks
     system_content = "\n\n".join(filter(None, [
         ctx.system_prompt,
+        "---",
+        persona_block,
         "---",
         ctx.user_context_block,
         "---",
