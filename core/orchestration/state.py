@@ -70,4 +70,8 @@ class L1SupportState(BaseModel):
     human_feedback: str | None = None
     is_paused: bool = False
 
+    # ── Cognitive Guardrails & Compliance ─────────────────────────────
+    compliance_score: float = 1.0
+    compliance_violations: str | None = None
+
     model_config = ConfigDict(arbitrary_types_allowed=True)

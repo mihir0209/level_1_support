@@ -1059,6 +1059,16 @@ async def pending_approvals():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@admin_router.get("/audit-logs", tags=["Audit Logs"])
+async def audit_logs(limit: int = 50, offset: int = 0, brand_id: str | None = None):
+    """Retrieve paginated and filterable session audit logs from PostgreSQL."""
+    try:
+        from feedback.engine import get_all_audit_logs
+        return get_all_audit_logs(limit=limit, offset=offset, brand_id=brand_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Graph endpoints ───────────────────────────────────────────────────────────
 @admin_router.get("/graph/summary", tags=["Graph"])
 async def graph_summary():

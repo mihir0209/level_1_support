@@ -313,3 +313,106 @@ def dismiss_resolution_review(queue_id: str) -> bool:
     except Exception as e:
         log.warning("resolution_dismiss_failed", queue_id=queue_id, error=str(e))
         return False
+
+
+def write_session_audit_log(
+    session_id: str,
+    brand_id: str,
+    customer_id: str | None,
+    intent_trajectory: list[str],
+    tools_executed: list[str],
+    policies_matched: list[str],
+    compliance_score: float,
+    compliance_violations: str | None,
+    audit_summary: str | None
+) -> None:
+    """Write a completed support session audit log to Postgres."""
+    import json
+    conn = None
+    try:
+        conn = _get_db_conn()
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO session_audit_logs 
+                    (session_id, brand_id, customer_id, intent_trajectory, tools_executed, policies_matched, compliance_score, compliance_violations, audit_summary)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    session_id,
+                    brand_id,
+                    customer_id,
+                    json.dumps(intent_trajectory),
+                    json.dumps(tools_executed),
+                    json.dumps(policies_matched),
+                    compliance_score,
+                    compliance_violations,
+                    audit_summary
+                ))
+        log.info("session_audit_log_written", session_id=session_id, brand_id=brand_id, compliance_score=compliance_score)
+    except Exception as e:
+        log.warning("session_audit_log_write_failed", session_id=session_id, error=str(e))
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_all_audit_logs(limit: int = 50, offset: int = 0, brand_id: str | None = None) -> dict[str, Any]:
+    """Retrieve paginated and filterable session audit logs from PostgreSQL."""
+    conn = None
+    try:
+        conn = _get_db_conn()
+        with conn:
+            with conn.cursor() as cur:
+                if brand_id:
+                    query = """
+                        SELECT id, session_id, brand_id, customer_id, intent_trajectory, tools_executed, policies_matched, compliance_score, compliance_violations, audit_summary, created_at
+                        FROM session_audit_logs
+                        WHERE brand_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT %s OFFSET %s
+                    """
+                    params = (brand_id, limit, offset)
+                    
+                    count_query = "SELECT COUNT(*) FROM session_audit_logs WHERE brand_id = %s"
+                    count_params = (brand_id,)
+                else:
+                    query = """
+                        SELECT id, session_id, brand_id, customer_id, intent_trajectory, tools_executed, policies_matched, compliance_score, compliance_violations, audit_summary, created_at
+                        FROM session_audit_logs
+                        ORDER BY created_at DESC
+                        LIMIT %s OFFSET %s
+                    """
+                    params = (limit, offset)
+                    
+                    count_query = "SELECT COUNT(*) FROM session_audit_logs"
+                    count_params = ()
+
+                cur.execute(query, params)
+                rows = cur.fetchall()
+                
+                cur.execute(count_query, count_params)
+                total = cur.fetchone()[0]
+
+                items = []
+                for r in rows:
+                    items.append({
+                        "id": r[0],
+                        "session_id": r[1],
+                        "brand_id": r[2],
+                        "customer_id": r[3],
+                        "intent_trajectory": r[4],
+                        "tools_executed": r[5],
+                        "policies_matched": r[6],
+                        "compliance_score": r[7],
+                        "compliance_violations": r[8],
+                        "audit_summary": r[9],
+                        "created_at": r[10].isoformat() if r[10] else None
+                    })
+
+                return {"total": total, "items": items, "limit": limit, "offset": offset}
+    except Exception as e:
+        log.warning("get_all_audit_logs_failed", error=str(e))
+        return {"total": 0, "items": [], "limit": limit, "offset": offset}
+    finally:
+        if conn:
+            conn.close()

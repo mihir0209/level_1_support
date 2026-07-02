@@ -227,3 +227,19 @@ class RegisteredBrand(Base):
     brand_voice: Mapped[str | None] = mapped_column(Text, nullable=True)
     config: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class SessionAuditLog(Base):
+    __tablename__ = "session_audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    brand_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    customer_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    intent_trajectory: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    tools_executed: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    policies_matched: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    compliance_score: Mapped[float] = mapped_column(Float, default=1.0, server_default="1.0")
+    compliance_violations: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audit_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)

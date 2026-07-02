@@ -30,6 +30,7 @@ function app() {
       { id: 'sessions',     label: 'Sessions' },
       { id: 'review',       label: 'Review Queue' },
       { id: 'action_approvals', label: 'Action Approvals' },
+      { id: 'audit_logs',   label: 'Audit Logs' },
       { id: 'monitoring',  label: 'Monitoring' },
       { id: 'brands',       label: 'Brands' },
       { id: 'graph',        label: 'Graph' },
@@ -1013,6 +1014,60 @@ function app() {
       } finally {
         this.approvalLoading = false;
       }
+    },
+
+    // AUDIT LOGS
+    // ════════════════════════════════════════════════════════════════
+    auditLogs: [],
+    totalAudits: 0,
+    selectedAudit: null,
+    auditBrandFilter: '',
+    auditLimit: 20,
+    auditOffset: 0,
+    auditLoading: false,
+
+    async loadAuditLogs() {
+      this.auditLoading = true;
+      try {
+        let url = `/admin/audit-logs?limit=${this.auditLimit}&offset=${this.auditOffset}`;
+        if (this.auditBrandFilter) {
+          url += `&brand_id=${encodeURIComponent(this.auditBrandFilter)}`;
+        }
+        const data = await this.api(url);
+        this.auditLogs = data.items || [];
+        this.totalAudits = data.total || 0;
+        
+        // Auto select first item if none selected and items are available
+        if (this.auditLogs.length && !this.selectedAudit) {
+          this.selectedAudit = this.auditLogs[0];
+        } else if (!this.auditLogs.length) {
+          this.selectedAudit = null;
+        }
+      } catch (e) {
+        this.toast('Failed to load audit logs: ' + e.message, 'toast-error');
+      } finally {
+        this.auditLoading = false;
+      }
+    },
+
+    async nextAuditPage() {
+      if (this.auditOffset + this.auditLimit < this.totalAudits) {
+        this.auditOffset += this.auditLimit;
+        await this.loadAuditLogs();
+      }
+    },
+
+    async prevAuditPage() {
+      if (this.auditOffset >= this.auditLimit) {
+        this.auditOffset -= this.auditLimit;
+        await this.loadAuditLogs();
+      }
+    },
+
+    formatTime(isoString) {
+      if (!isoString) return '';
+      const d = new Date(isoString);
+      return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     },
   };
 }

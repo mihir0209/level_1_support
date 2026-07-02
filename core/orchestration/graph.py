@@ -1000,6 +1000,40 @@ async def node_escalate(state: L1SupportState) -> dict[str, Any]:
     except Exception as e:
         log.warning("n8n_escalation_webhook_failed", error=str(e))
 
+    # Write session audit log
+    try:
+        from feedback.engine import write_session_audit_log
+        tools_executed = []
+        for msg in state.messages:
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tools_executed.append(tc.get("name"))
+            elif isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tools_executed.append(tc.get("name"))
+
+        policies_matched = []
+        if state.context_package and state.context_package.intent:
+            policies_matched.append(state.context_package.intent.issue_type)
+
+        intent_trajectory = []
+        if state.intent:
+            intent_trajectory.append(state.intent.issue_type)
+
+        write_session_audit_log(
+            session_id=state.session_id,
+            brand_id=state.brand_id,
+            customer_id=state.customer_id,
+            intent_trajectory=intent_trajectory,
+            tools_executed=tools_executed,
+            policies_matched=policies_matched,
+            compliance_score=state.compliance_score,
+            compliance_violations=state.compliance_violations,
+            audit_summary=f"Session escalated to human support: {reason} (turn count: {state.turn_count})."
+        )
+    except Exception as ae:
+        log.warning("audit_log_trigger_failed", error=str(ae))
+
     return {
         "is_resolved": False,
         "outcome": SessionOutcome.ESCALATED,
@@ -1118,9 +1152,136 @@ async def node_close_session(state: L1SupportState) -> dict[str, Any]:
     except Exception as e:
         log.warning("chatwoot_resolve_conversation_failed", error=str(e))
 
+    # Write session audit log
+    try:
+        from feedback.engine import write_session_audit_log
+        tools_executed = []
+        for msg in state.messages:
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tools_executed.append(tc.get("name"))
+            elif isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    tools_executed.append(tc.get("name"))
+
+        policies_matched = []
+        if state.context_package and state.context_package.intent:
+            policies_matched.append(state.context_package.intent.issue_type)
+
+        intent_trajectory = []
+        if state.intent:
+            intent_trajectory.append(state.intent.issue_type)
+
+        write_session_audit_log(
+            session_id=state.session_id,
+            brand_id=state.brand_id,
+            customer_id=state.customer_id,
+            intent_trajectory=intent_trajectory,
+            tools_executed=tools_executed,
+            policies_matched=policies_matched,
+            compliance_score=state.compliance_score,
+            compliance_violations=state.compliance_violations,
+            audit_summary=f"Session resolved successfully in {state.turn_count} turns."
+        )
+    except Exception as ae:
+        log.warning("audit_log_trigger_failed", error=str(ae))
+
     return {
         "is_resolved": True,
         "outcome": SessionOutcome.RESOLVED,
+    }
+
+
+async def node_guardrail(state: L1SupportState) -> dict[str, Any]:
+    """
+    Cognitive guardrails: validate factuality and brand voice before outputting.
+    """
+    if state.is_paused:
+        return {}
+
+    # Get last message
+    last_ai_message = None
+    for msg in reversed(state.messages):
+        if isinstance(msg, AIMessage):
+            last_ai_message = msg
+            break
+
+    if not last_ai_message or not last_ai_message.content:
+        return {}
+
+    # If it has tool calls, do not check (it's not customer-facing text yet)
+    if getattr(last_ai_message, "tool_calls", None):
+        return {}
+
+    # Retrieve policy context
+    policy_text = ""
+    brand_voice_rules = ""
+    if state.context_package:
+        policy_text = "\n".join(filter(None, [
+            state.context_package.policy_block,
+            state.context_package.shipping_block,
+            state.context_package.user_context_block
+        ]))
+        brand_voice_rules = getattr(state.context_package, "system_prompt", "")
+
+    # Query LLM to evaluate the response
+    from core.orchestration.llm import get_llm_client
+    llm = get_llm_client()
+    
+    eval_prompt = (
+        "You are a strict QA Compliance Guardrail. Validate the proposed AI support response below against the retrieved policy facts and brand voice rules.\n\n"
+        "Proposed Response:\n"
+        f"\"\"\"{last_ai_message.content}\"\"\"\n\n"
+        "Retrieved Policy Facts:\n"
+        f"\"\"\"{policy_text}\"\"\"\n\n"
+        "Brand Voice Guidelines / Rules:\n"
+        f"\"\"\"{brand_voice_rules}\"\"\"\n\n"
+        "Evaluate two conditions:\n"
+        "1. HALLUCINATION: Does the proposed response make claims not supported by or conflicting with the policy facts? (e.g., claiming refunds take 3 days when facts say 14 days, or allowing returns on excluded item categories).\n"
+        "2. BRAND VOICE VIOLATION: Does the proposed response use forbidden phrases or unprofessional/inappropriate language?\n\n"
+        "Respond in strict JSON format:\n"
+        "{\n"
+        "  \"passed\": true/false,\n"
+        "  \"hallucination_reason\": \"description or null\",\n"
+        "  \"brand_voice_reason\": \"description or null\",\n"
+        "  \"corrected_response\": \"a revised version of the response correcting any errors, or null if passed\"\n"
+        "}"
+    )
+    
+    try:
+        fast_client = llm.get_lc_client(fast=True)
+        eval_res = await fast_client.ainvoke([HumanMessage(content=eval_prompt)])
+        
+        # Parse and self-heal JSON if needed
+        import json
+        try:
+            parsed = json.loads(eval_res.content)
+        except Exception as json_err:
+            parsed = await llm.self_heal_json(eval_res.content, str(json_err))
+        
+        if parsed and not parsed.get("passed", True) and parsed.get("corrected_response"):
+            corrected = parsed["corrected_response"]
+            log.warning(
+                "guardrail_violation_corrected",
+                session_id=state.session_id,
+                hallucination_reason=parsed.get("hallucination_reason"),
+                brand_voice_reason=parsed.get("brand_voice_reason")
+            )
+            # Create a corrected AI message
+            new_msg = AIMessage(content=corrected)
+            
+            # Record audit metrics: decrease compliance score
+            return {
+                "messages": [new_msg],
+                "compliance_score": 0.5,
+                "compliance_violations": f"Hallucination: {parsed.get('hallucination_reason')}; Brand Voice: {parsed.get('brand_voice_reason')}"
+            }
+    except Exception as e:
+        log.warning("guardrail_evaluation_failed", error=str(e))
+        
+    return {
+        "compliance_score": 1.0,
+        "compliance_violations": None
     }
 
 
@@ -1142,6 +1303,7 @@ def build_graph() -> StateGraph:
     builder.add_node("tools", StatefulToolNode(static_tools=ALL_TOOLS))
     builder.add_node("escalate", node_escalate)
     builder.add_node("close", node_close_session)
+    builder.add_node("guardrail", node_guardrail)
 
     # ── Add edges ─────────────────────────────────────────────────────────
     builder.add_edge(START, "assemble_context")
@@ -1153,11 +1315,11 @@ def build_graph() -> StateGraph:
         "generate_response",
         check_resolution_routing,
         {
-            "end":      END,       # specialist handled — end this turn; next message restarts
+            "end":      "guardrail",       # Go to guardrail check before returning
             "tools":    "tools",
             "escalate": "escalate",
             "close":    "close",
-            "continue": END,        # no tool calls, wait for next customer message
+            "continue": "guardrail",
         },
     )
 
@@ -1167,6 +1329,7 @@ def build_graph() -> StateGraph:
     # Terminal nodes
     builder.add_edge("escalate", END)
     builder.add_edge("close", END)
+    builder.add_edge("guardrail", END)
 
     return builder.compile()
 
