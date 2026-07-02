@@ -81,4 +81,7 @@ class L1SupportState(BaseModel):
     is_takeover: bool = False
     escalation_risk: float = 0.0
 
+    # ── Multi-Agent Parallel Delegation ────────────────────────────────
+    sub_tasks: list[dict] = []
+
     model_config = ConfigDict(arbitrary_types_allowed=True)

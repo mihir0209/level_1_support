@@ -56,6 +56,7 @@ function app() {
     customerCSAT: 'N/A',
     customerHistory: '0 sessions',
     empathyMode: 'professional',
+    subTasks: [],
 
     flowSteps: [
       { label: 'Intent Classification', desc: 'Fast model classifies query type', done: false, active: false },
@@ -404,6 +405,7 @@ function app() {
         });
         this.lastResponse = data;
         this.currentSentiment = data.current_sentiment || 'neutral';
+        this.subTasks = data.sub_tasks || [];
         this.messages.push({ role: 'agent', content: data.response, intent: data.intent, time: new Date().toLocaleTimeString() });
         this.activateFlow(4);
         if (data.is_resolved) { this.markFlowDone(5); }

@@ -316,6 +316,7 @@ class ChatResponse(BaseModel):
     current_sentiment: str = "neutral"
     escalation_risk: float = 0.0
     is_takeover: bool = False
+    sub_tasks: list[dict] = []
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -704,6 +705,10 @@ async def chat(req: ChatRequest, request: Request = None):
             escalation_risk=session_data.get("escalation_risk", 0.0),
         )
 
+    # 2. Run Multi-Agent Parallel Task Coordinator
+    from core.orchestration.coordinator import decompose_compound_request
+    tasks = await decompose_compound_request(req.message)
+
     # Fetch customer (Phase 1: mock; Phase 2: real API)
     customer = get_mock_customer(
         req.customer_id or session_data.get("customer_id"),
@@ -742,11 +747,19 @@ async def chat(req: ChatRequest, request: Request = None):
         compliance_violations=session_data.get("compliance_violations"),
         is_takeover=False,
         escalation_risk=session_data.get("escalation_risk", 0.0),
+        sub_tasks=tasks,
     )
 
     # Run the graph
     graph = get_graph()
     result_state = await graph.ainvoke(state)
+    
+    # Normalize state to dict representation to support safe .get() accessors
+    if not isinstance(result_state, dict):
+        if hasattr(result_state, "model_dump"):
+            result_state = result_state.model_dump()
+        else:
+            result_state = dict(result_state)
 
     # Extract AI response from messages — handle both dict and BaseMessage types
     ai_response = ""
@@ -794,6 +807,7 @@ async def chat(req: ChatRequest, request: Request = None):
         "current_sentiment": sentiment,
         "is_takeover": False,
         "escalation_risk": risk_score,
+        "sub_tasks": tasks,
     })
 
     latency_ms = (time.monotonic() - t_start) * 1000
@@ -830,6 +844,7 @@ async def chat(req: ChatRequest, request: Request = None):
         current_sentiment=sentiment,
         escalation_risk=risk_score,
         is_takeover=False,
+        sub_tasks=tasks,
     )
 
 

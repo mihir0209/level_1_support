@@ -539,6 +539,36 @@
             </div>
           </div>
 
+          <!-- Multi-Agent Parallel Dispatch -->
+          <template x-if="subTasks.length > 0">
+            <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 shadow-sm mt-4">
+              <div class="px-4 py-3 border-b border-surface-100 dark:border-surface-700 flex items-center justify-between">
+                <span class="text-sm font-semibold">Multi-Agent Task Dispatcher</span>
+                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-50 text-purple-750 dark:bg-purple-950/20 dark:text-purple-400 uppercase tracking-wider">
+                  Coordinator Active
+                </span>
+              </div>
+              <div class="p-4 space-y-3">
+                <template x-for="(task, idx) in subTasks" :key="idx">
+                  <div class="flex items-start gap-2.5 bg-surface-50 dark:bg-surface-900 p-2.5 rounded-lg border border-surface-150 dark:border-surface-700/50">
+                    <div class="w-2 h-2 rounded-full mt-1.5 flex-shrink-0"
+                      :class="task.task_type === 'returns' ? 'bg-orange-500' : task.task_type === 'shipping_wismo' ? 'bg-blue-500' : 'bg-green-500'"></div>
+                    <div class="space-y-1 text-xs">
+                      <div class="flex items-center gap-1.5 flex-wrap">
+                        <span class="font-bold uppercase text-[9px] tracking-wider"
+                          :class="task.task_type === 'returns' ? 'text-orange-600 dark:text-orange-400' : task.task_type === 'shipping_wismo' ? 'text-blue-600' : 'text-green-600'"
+                          x-text="task.task_type"></span>
+                        <span class="text-surface-400">•</span>
+                        <span class="text-surface-400 font-medium italic truncate max-w-xs" x-text="'Sub-query: ' + task.sub_query"></span>
+                      </div>
+                      <p class="text-surface-600 dark:text-surface-300" x-text="task.explanation"></p>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
           <!-- Escalation triggers -->
           <div class="bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700">
             <div class="px-4 py-3 border-b border-surface-100 dark:border-surface-700 flex items-center gap-2">
