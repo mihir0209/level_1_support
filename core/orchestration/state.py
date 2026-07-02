@@ -77,4 +77,8 @@ class L1SupportState(BaseModel):
     # ── Empathy Persona & Styling ──────────────────────────────────────
     empathy_mode: str = "professional"
 
+    # ── Predictive Takeover & Risk Scorer ──────────────────────────────
+    is_takeover: bool = False
+    escalation_risk: float = 0.0
+
     model_config = ConfigDict(arbitrary_types_allowed=True)

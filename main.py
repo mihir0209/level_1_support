@@ -314,6 +314,8 @@ class ChatResponse(BaseModel):
     is_paused: bool = False
     pending_action: dict | None = None
     current_sentiment: str = "neutral"
+    escalation_risk: float = 0.0
+    is_takeover: bool = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -589,6 +591,27 @@ def analyze_sentiment(message: str) -> str:
     return "neutral"
 
 
+def calculate_escalation_risk(turn_count: int, sentiment: str, resolution_attempts: int) -> float:
+    """Compute escalation risk score between 0.0 and 1.0."""
+    risk = 0.0
+    
+    # 1. Turn count penalty (linearly scales after 4 turns)
+    if turn_count > 4:
+        risk += min((turn_count - 4) * 0.10, 0.40)
+        
+    # 2. Sentiment penalty
+    if sentiment == "frustrated":
+        risk += 0.35
+    elif sentiment == "happy":
+        risk -= 0.10
+        
+    # 3. Repeated resolution attempts
+    if resolution_attempts > 0:
+        risk += min(resolution_attempts * 0.15, 0.35)
+        
+    return max(0.0, min(risk, 1.0))
+
+
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
 async def chat(req: ChatRequest, request: Request = None):
     """
@@ -654,6 +677,32 @@ async def chat(req: ChatRequest, request: Request = None):
 
     brand_id = session_data["brand_id"]
     channel = Channel(session_data["channel"])
+    is_takeover = session_data.get("is_takeover", False)
+
+    # 1. Takeover Bypass Logic
+    if is_takeover:
+        updated_messages = [
+            *(m.content if isinstance(m, (HumanMessage, AIMessage)) else m
+              for m in (session_data.get("messages", []) or [])),
+            {"role": "user", "content": req.message},
+        ]
+        ai_response = "A human supervisor has taken over this chat to assist you directly."
+        updated_messages.append({"role": "assistant", "content": ai_response})
+        
+        await update_session(req.session_id, {
+            "messages": updated_messages,
+            "turn_count": session_data.get("turn_count", 0) + 1,
+            "current_sentiment": sentiment,
+        })
+        
+        return ChatResponse(
+            session_id=req.session_id,
+            response=ai_response,
+            turn_count=session_data.get("turn_count", 0) + 1,
+            is_takeover=True,
+            current_sentiment=sentiment,
+            escalation_risk=session_data.get("escalation_risk", 0.0),
+        )
 
     # Fetch customer (Phase 1: mock; Phase 2: real API)
     customer = get_mock_customer(
@@ -691,6 +740,8 @@ async def chat(req: ChatRequest, request: Request = None):
         empathy_mode=req.empathy_mode or session_data.get("empathy_mode", "professional"),
         compliance_score=session_data.get("compliance_score", 1.0),
         compliance_violations=session_data.get("compliance_violations"),
+        is_takeover=False,
+        escalation_risk=session_data.get("escalation_risk", 0.0),
     )
 
     # Run the graph
@@ -719,10 +770,18 @@ async def chat(req: ChatRequest, request: Request = None):
         {"role": "user", "content": req.message},
         {"role": "assistant", "content": ai_response},
     ]
+    turn_count = result_state.get("turn_count", state.turn_count + 1)
+    resolution_attempts = result_state.get("resolution_attempts", state.resolution_attempts)
+    risk_score = calculate_escalation_risk(
+        turn_count=turn_count,
+        sentiment=sentiment,
+        resolution_attempts=resolution_attempts
+    )
+
     await update_session(req.session_id, {
         "messages": updated_messages,
-        "turn_count": result_state.get("turn_count", state.turn_count + 1),
-        "resolution_attempts": result_state.get("resolution_attempts", state.resolution_attempts),
+        "turn_count": turn_count,
+        "resolution_attempts": resolution_attempts,
         "is_resolved": is_resolved,
         "outcome": result_state.get("outcome").value if result_state.get("outcome") else None,
         "pending_action": result_state.get("pending_action"),
@@ -733,6 +792,8 @@ async def chat(req: ChatRequest, request: Request = None):
         "compliance_score": result_state.get("compliance_score", 1.0),
         "compliance_violations": result_state.get("compliance_violations"),
         "current_sentiment": sentiment,
+        "is_takeover": False,
+        "escalation_risk": risk_score,
     })
 
     latency_ms = (time.monotonic() - t_start) * 1000
@@ -762,11 +823,13 @@ async def chat(req: ChatRequest, request: Request = None):
         is_resolved=is_resolved,
         is_escalated=is_escalated,
         escalation_ticket=escalation_ticket,
-        turn_count=result_state.get("turn_count", 1),
+        turn_count=turn_count,
         latency_ms=round(latency_ms, 1),
         is_paused=result_state.get("is_paused", False),
         pending_action=result_state.get("pending_action"),
         current_sentiment=sentiment,
+        escalation_risk=risk_score,
+        is_takeover=False,
     )
 
 
@@ -1753,6 +1816,8 @@ async def list_sessions(brand_id: Annotated[str | None, Query(max_length=64)] = 
                     "turn_count": d.get("turn_count", 0),
                     "outcome": d.get("outcome"),
                     "created_at": d.get("created_at"),
+                    "is_takeover": d.get("is_takeover", False),
+                    "escalation_risk": d.get("escalation_risk", 0.0),
                 })
     return {"count": len(sessions), "sessions": sessions}
 
@@ -1865,6 +1930,44 @@ async def get_review_queue(
         return {"count": total_count, "items": items}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+
+class TakeoverRequest(BaseModel):
+    is_takeover: bool
+
+
+class InterceptRequest(BaseModel):
+    message: str
+
+
+@admin_router.post("/session/{session_id}/takeover", tags=["Takeover"])
+async def toggle_session_takeover(session_id: str, payload: TakeoverRequest):
+    """Toggle takeover mode on the specified session."""
+    session_data = await get_session(session_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    
+    session_data["is_takeover"] = payload.is_takeover
+    await update_session(session_id, session_data)
+    return {"status": "success", "is_takeover": payload.is_takeover}
+
+
+@admin_router.post("/session/{session_id}/intercept", tags=["Takeover"])
+async def intercept_session_message(session_id: str, payload: InterceptRequest):
+    """Allow a supervisor to directly append an assistant response message to the session."""
+    session_data = await get_session(session_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    
+    updated_messages = session_data.get("messages", [])
+    updated_messages.append({"role": "assistant", "content": payload.message})
+    
+    session_data["messages"] = updated_messages
+    session_data["is_takeover"] = True  # Automatically locks into takeover mode on intercept
+    await update_session(session_id, session_data)
+    
+    return {"status": "success", "message": payload.message}
+
 
 @admin_router.post("/review/{item_id}/approve", tags=["Review Queue"])
 async def approve_review_item(item_id: str, payload: ResolutionUpdateModel | None = None):

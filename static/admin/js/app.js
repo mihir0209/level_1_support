@@ -93,6 +93,7 @@ function app() {
       { id: 'detail', label: 'Session Detail' },
     ],
     selectedSessId: '',
+    sessTakeoverInput: '',
     sessionDetail: null,
 
     // ── MONITORING ──────────────────────────────────────────────
@@ -511,6 +512,41 @@ function app() {
       this.sessTab = 'detail';
       try { this.sessionDetail = await this.api('/admin/sessions/' + id); }
       catch (e) { this.sessionDetail = null; this.toast('Failed to load session: ' + e.message, 'toast-error'); }
+    },
+
+    async toggleTakeover(sessionId, forceVal) {
+      try {
+        const res = await this.api('/admin/session/' + sessionId + '/takeover', {
+          method: 'POST',
+          body: JSON.stringify({ is_takeover: forceVal })
+        });
+        if (this.sessionDetail && this.sessionDetail.session_id === sessionId) {
+          this.sessionDetail.is_takeover = res.is_takeover;
+        }
+        await this.refreshSessions();
+        this.toast(`Takeover state updated!`, 'toast-success');
+      } catch (e) {
+        this.toast('Takeover toggle failed: ' + e.message, 'toast-error');
+      }
+    },
+
+    async sendTakeoverMessage(sessionId, message) {
+      if (!message.trim()) return;
+      try {
+        const res = await this.api('/admin/session/' + sessionId + '/intercept', {
+          method: 'POST',
+          body: JSON.stringify({ message: message })
+        });
+        if (this.sessionDetail && this.sessionDetail.session_id === sessionId) {
+          if (!this.sessionDetail.messages) this.sessionDetail.messages = [];
+          this.sessionDetail.messages.push({ role: 'assistant', content: res.message });
+          this.sessionDetail.is_takeover = true;
+        }
+        this.sessTakeoverInput = '';
+        this.toast('Message sent to customer!', 'toast-success');
+      } catch (e) {
+        this.toast('Failed to send message: ' + e.message, 'toast-error');
+      }
     },
 
     // ════════════════════════════════════════════════════════════════
