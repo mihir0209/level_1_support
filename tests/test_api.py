@@ -573,6 +573,7 @@ class TestHardening:
         mock_g = MagicMock()
         mock_g.ainvoke = fake_ainvoke
         monkeypatch.setattr("main.get_graph", lambda: mock_g)
+        monkeypatch.setattr("core.middleware.safety_shield.check_input_safety", AsyncMock(return_value=(True, "safe")))
 
         r2 = client.post("/chat", json={"session_id": session_id, "message": "<b>Hello</b><script>alert(1)</script>"})
         assert r2.status_code == 200
@@ -591,8 +592,8 @@ class TestHardening:
         ]
         for msg in injections:
             r2 = client.post("/chat", json={"session_id": session_id, "message": msg})
-            assert r2.status_code == 400
-            assert "Potential prompt injection detected" in r2.json()["detail"]
+            assert r2.status_code == 200
+            assert "Invalid request pattern detected" in r2.json()["response"]
 
     def test_session_rate_limit_exhausted(self, client, monkeypatch):
         r = client.post("/session/new", json={"brand": "boohoo_uk", "channel": "chat"})

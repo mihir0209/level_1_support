@@ -1235,6 +1235,8 @@ function app() {
     auditLimit: 20,
     auditOffset: 0,
     auditLoading: false,
+    safetyAlerts: [],
+    safetyLoading: false,
 
     async loadAuditLogs() {
       this.auditLoading = true;
@@ -1257,6 +1259,19 @@ function app() {
         this.toast('Failed to load audit logs: ' + e.message, 'toast-error');
       } finally {
         this.auditLoading = false;
+      }
+      await this.loadSafetyAlerts();
+    },
+
+    async loadSafetyAlerts() {
+      this.safetyLoading = true;
+      try {
+        const d = await this.api('/safety/alerts?limit=20');
+        this.safetyAlerts = d.items || [];
+      } catch (_) {
+        this.safetyAlerts = [];
+      } finally {
+        this.safetyLoading = false;
       }
     },
 

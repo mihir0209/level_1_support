@@ -651,23 +651,6 @@ async def chat(req: ChatRequest, request: Request = None):
             detail="Message is empty after sanitization."
         )
 
-    # Reject obvious prompt injection patterns
-    injection_patterns = [
-        r"(?i)\bignore\s+(all\s+)?prior\s+instructions\b",
-        r"(?i)\bignore\s+previous\s+instructions\b",
-        r"(?i)\boverride\s+safety\b",
-        r"(?i)\byou\s+are\s+now\s+a\b",
-        r"(?i)\byou\s+are\s+now\s+an\b",
-        r"(?i)\bsystem\s+prompt\b"
-    ]
-    for pattern in injection_patterns:
-        if re.search(pattern, req.message):
-            log.warning("prompt_injection_attempted", session_id=req.session_id, message=req.message)
-            raise HTTPException(
-                status_code=400,
-                detail="Potential prompt injection detected."
-            )
-
     # Analyze user sentiment
     sentiment = analyze_sentiment(req.message)
 
@@ -679,6 +662,61 @@ async def chat(req: ChatRequest, request: Request = None):
     brand_id = session_data["brand_id"]
     channel = Channel(session_data["channel"])
     is_takeover = session_data.get("is_takeover", False)
+
+    # ── Input Safety Shield (Phase 15) ──
+    from core.middleware.safety_shield import check_input_safety
+    is_safe, reason = await check_input_safety(req.message)
+    if not is_safe:
+        safety_response = (
+            "Invalid request pattern detected. This session has been paused and escalated "
+            "to a security representative for manual compliance audit."
+        )
+        turn_count = session_data.get("turn_count", 0) + 1
+        updated_messages = [
+            *(m.content if isinstance(m, (HumanMessage, AIMessage)) else m
+              for m in (session_data.get("messages", []) or [])),
+            {"role": "user", "content": req.message},
+            {"role": "assistant", "content": safety_response},
+        ]
+
+        # Trigger postgres audit log write
+        from feedback.engine import write_session_audit_log
+        write_session_audit_log(
+            session_id=req.session_id,
+            brand_id=brand_id,
+            customer_id=req.customer_id or session_data.get("customer_id"),
+            intent_trajectory=["prompt_injection_detection"],
+            tools_executed=[],
+            policies_matched=[],
+            compliance_score=0.0,
+            compliance_violations="prompt_injection",
+            audit_summary=f"Pre-flight Safety Shield triggered: {reason}. Adversarial payload blocked."
+        )
+
+        await update_session(req.session_id, {
+            "messages": updated_messages,
+            "turn_count": turn_count,
+            "is_resolved": False,
+            "outcome": "escalated",
+            "is_paused": True,
+            "compliance_score": 0.0,
+            "compliance_violations": "prompt_injection",
+        })
+
+        return ChatResponse(
+            session_id=req.session_id,
+            response=safety_response,
+            intent="security_escalation",
+            is_resolved=False,
+            is_escalated=True,
+            turn_count=turn_count,
+            latency_ms=0.0,
+            is_paused=True,
+            current_sentiment="frustrated",
+            escalation_risk=1.0,
+            is_takeover=False,
+            sub_tasks=[]
+        )
 
     # 1. Takeover Bypass Logic
     if is_takeover:
@@ -1425,6 +1463,19 @@ async def reject_graph_enrichment_endpoint(payload: EnrichmentActionRequest):
         from core.ontology.enricher import reject_enrichment
         await reject_enrichment(payload.enrichment_id)
         return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/safety/alerts", tags=["Security"])
+async def get_safety_alerts(limit: int = 50, offset: int = 0):
+    """Retrieve compliance logs specifically related to prompt injection threats."""
+    try:
+        from feedback.engine import get_all_audit_logs
+        logs_res = get_all_audit_logs(limit=limit * 4, offset=offset)
+        items = logs_res.get("items", [])
+        safety_alerts = [item for item in items if item.get("compliance_violations") == "prompt_injection"]
+        return {"count": len(safety_alerts), "items": safety_alerts[:limit]}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -1264,6 +1264,31 @@
         </div>
       </div>
 
+      <!-- Prompt Injection Safety Alerts List (Phase 15) -->
+      <template x-if="safetyAlerts.length">
+        <div class="mb-6 bg-red-50/50 dark:bg-red-950/15 border border-red-250 dark:border-red-900 rounded-xl p-5 space-y-4">
+          <div class="flex items-center gap-2">
+            <span class="inline-flex items-center justify-center w-5 h-5 rounded-full bg-red-600 text-white text-xs font-bold">!</span>
+            <h2 class="text-sm font-bold text-red-900 dark:text-red-400">Security Interceptions & Jailbreak Warnings</h2>
+          </div>
+          
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <template x-for="a in safetyAlerts" :key="a.session_id">
+              <div class="p-4 bg-white dark:bg-surface-850 rounded-xl border border-red-200 dark:border-red-950 shadow-sm flex flex-col justify-between space-y-2">
+                <div class="space-y-1 text-xs">
+                  <div class="flex items-center justify-between">
+                    <span class="mono font-bold text-red-600 dark:text-red-400" x-text="a.brand_id.toUpperCase() + ' Attack Blocked'"></span>
+                    <span class="text-[10px] text-surface-450" x-text="new Date(a.created_at).toLocaleString()"></span>
+                  </div>
+                  <p class="text-surface-700 dark:text-surface-300 font-medium" x-text="a.audit_summary"></p>
+                </div>
+                <div class="bg-red-50/20 dark:bg-red-950/5 p-2 rounded text-[11px] text-red-800 dark:text-red-300/80 font-semibold border-l-2 border-red-500 truncate" x-text="'Session: ' + a.session_id"></div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+
       <!-- Main Dual-Pane layout -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
