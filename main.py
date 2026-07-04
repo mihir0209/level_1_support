@@ -187,6 +187,47 @@ app = FastAPI(
     openapi_tags=_OPENAPI_TAGS,
 )
 
+from fastapi import WebSocket, WebSocketDisconnect
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        dead = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                dead.append(connection)
+        for connection in dead:
+            self.disconnect(connection)
+
+ws_manager = ConnectionManager()
+
+
+@app.websocket("/admin/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """Broadcasting endpoint for real-time compliance alerting & session updates."""
+    await ws_manager.connect(websocket)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+    except Exception:
+        ws_manager.disconnect(websocket)
+
 from core.middleware.rate_limit import rate_limit_middleware
 from core.logging_config import bind_correlation, clear_correlation
 
@@ -704,6 +745,30 @@ async def chat(req: ChatRequest, request: Request = None):
             "compliance_violations": "prompt_injection",
         })
 
+        # Broadcast safety alert and session update via WebSocket (Phase 21)
+        await ws_manager.broadcast({
+            "event": "safety_alert",
+            "data": {
+                "session_id": req.session_id,
+                "brand_id": brand_id,
+                "audit_summary": f"Pre-flight Safety Shield triggered: {reason}. Adversarial payload blocked.",
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            }
+        })
+        await ws_manager.broadcast({
+            "event": "session_updated",
+            "data": {
+                "session_id": req.session_id,
+                "brand_id": brand_id,
+                "channel": channel.value,
+                "turn_count": turn_count,
+                "outcome": "escalated",
+                "escalation_risk": 1.0,
+                "sla_status": "breached",
+                "is_takeover": False
+            }
+        })
+
         return ChatResponse(
             session_id=req.session_id,
             response=safety_response,
@@ -937,6 +1002,21 @@ async def chat(req: ChatRequest, request: Request = None):
         is_paused=result_state.get("is_paused", False),
         latency_ms=round(latency_ms, 1),
     )
+
+    # Broadcast session update via WebSocket (Phase 21)
+    await ws_manager.broadcast({
+        "event": "session_updated",
+        "data": {
+            "session_id": req.session_id,
+            "brand_id": brand_id,
+            "channel": channel.value,
+            "turn_count": turn_count,
+            "outcome": result_state.get("outcome", "active"),
+            "escalation_risk": risk_score,
+            "sla_status": sla_status,
+            "is_takeover": False
+        }
+    })
 
     return ChatResponse(
         session_id=req.session_id,

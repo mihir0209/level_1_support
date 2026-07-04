@@ -210,6 +210,8 @@ function app() {
     exportFormat: 'jsonl',
     exportLimit: 100,
     llmConfig: { primary_model: '', fallback_model: '', cumulative_costs_usd: 0.0, cumulative_savings_usd: 0.0, rate_limit_mitigations: 0 },
+    ws: null,
+    wsInterval: null,
 
     // ════════════════════════════════════════════════════════════════
     // LIFECYCLE
@@ -225,6 +227,7 @@ function app() {
       await this.loadCRMLogs();
       await this.loadSimResults();
       await this.loadLLMConfig();
+      this.connectWS();
       setInterval(() => this.refreshMonitoring(), 15000);
       window.addEventListener('popstate', () => this.syncFromUrl());
     },
@@ -1456,6 +1459,55 @@ function app() {
       } finally {
         this.analyticsLoading = false;
       }
+    },
+
+    connectWS() {
+      try {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = proto + '//' + window.location.host + '/admin/ws';
+        this.ws = new WebSocket(wsUrl);
+
+        this.ws.onopen = () => {
+          this.wsInterval = setInterval(() => {
+            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+              this.ws.send('ping');
+            }
+          }, 30000);
+        };
+
+        this.ws.onmessage = (event) => {
+          try {
+            if (event.data === 'pong') return;
+            const msg = JSON.parse(event.data);
+            
+            if (msg.event === 'session_updated') {
+              const existing = this.sessions.find(s => s.session_id === msg.data.session_id);
+              if (existing) {
+                Object.assign(existing, msg.data);
+              } else {
+                this.sessions.unshift(msg.data);
+              }
+              if (this.selectedSessId === msg.data.session_id) {
+                this.loadSessionDetail(msg.data.session_id);
+              }
+            }
+            
+            if (msg.event === 'safety_alert') {
+              this.safetyAlerts.unshift(msg.data);
+              this.toast(`Security Alert: Blocked attack payload in session ${msg.data.session_id}`, 'toast-error');
+            }
+          } catch (_) {}
+        };
+
+        this.ws.onclose = () => {
+          if (this.wsInterval) clearInterval(this.wsInterval);
+          setTimeout(() => this.connectWS(), 5000);
+        };
+
+        this.ws.onerror = () => {
+          if (this.ws) this.ws.close();
+        };
+      } catch (_) {}
     },
   };
 }
