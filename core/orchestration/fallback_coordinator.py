@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import time
 import structlog
-from core.memory.session import get_redis
 
 log = structlog.get_logger(__name__)
 
@@ -23,6 +22,7 @@ DEFAULT_CONFIG = {
 
 async def get_fallback_config() -> dict:
     """Retrieve active LLM fallback chain configurations."""
+    from core.memory.session import get_redis
     r = get_redis()
     raw = await r.get("llm:fallback:config")
     if raw:
@@ -35,6 +35,7 @@ async def get_fallback_config() -> dict:
 
 async def save_fallback_config(config: dict) -> None:
     """Save active LLM fallback chain configurations."""
+    from core.memory.session import get_redis
     r = get_redis()
     await r.set("llm:fallback:config", json.dumps(config))
     log.info("llm_fallback_config_saved", config=config)
@@ -77,6 +78,7 @@ async def call_llm_with_fallback(
     cost = (input_tokens * model_pricing["input"]) + (output_tokens * model_pricing["output"])
 
     if session_id:
+        from core.memory.session import get_redis
         r = get_redis()
         # Save cost per session
         await r.set(f"session:{session_id}:llm_cost", str(cost))
@@ -101,6 +103,7 @@ async def call_llm_with_fallback(
 
 async def get_gateway_analytics() -> dict:
     """Retrieve cumulative API savings and rate-limit mitigation history."""
+    from core.memory.session import get_redis
     r = get_redis()
     costs = float(await r.get("llm:cumulative_costs") or "0.0")
     savings = float(await r.get("llm:cumulative_savings") or "0.0")

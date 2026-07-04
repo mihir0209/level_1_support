@@ -194,7 +194,9 @@ class ConnectionManager:
         self.active_connections: list[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
+        import asyncio
         await websocket.accept()
+        websocket.custom_loop = asyncio.get_running_loop()
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
@@ -202,8 +204,18 @@ class ConnectionManager:
             self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
+        import asyncio
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
         dead = []
         for connection in self.active_connections:
+            conn_loop = getattr(connection, "custom_loop", None)
+            if conn_loop is not None and conn_loop is not current_loop:
+                dead.append(connection)
+                continue
             try:
                 await connection.send_json(message)
             except Exception:
@@ -820,6 +832,20 @@ async def chat(req: ChatRequest, request: Request = None):
         from core.orchestration.rl_engine import select_best_arm
         empathy_mode = await select_best_arm("empathy_mode")
 
+    sentiment_numeric = 0.6
+    if sentiment == "happy":
+        sentiment_numeric = 0.9
+    elif sentiment == "frustrated":
+        sentiment_numeric = 0.2
+
+    # Apply dynamic empathy adapters (Phase 22)
+    from core.orchestration.empathy_adapter import adjust_empathy_mode
+    adapted_empathy_mode = await adjust_empathy_mode(
+        session_id=req.session_id,
+        current_sentiment=sentiment_numeric,
+        baseline_mode=empathy_mode
+    )
+
     # Fetch customer (Phase 1: mock; Phase 2: real API)
     customer = get_mock_customer(
         req.customer_id or session_data.get("customer_id"),
@@ -853,7 +879,7 @@ async def chat(req: ChatRequest, request: Request = None):
         human_approval=session_data.get("human_approval"),
         human_feedback=session_data.get("human_feedback"),
         is_paused=session_data.get("is_paused", False),
-        empathy_mode=empathy_mode,
+        empathy_mode=adapted_empathy_mode,
         compliance_score=session_data.get("compliance_score", 1.0),
         compliance_violations=session_data.get("compliance_violations"),
         is_takeover=False,
@@ -1726,6 +1752,40 @@ async def save_llm_fallback_endpoint(payload: LLMFallbackRequest):
         config["primary_model"] = payload.primary_model
         config["fallback_model"] = payload.fallback_model
         await save_fallback_config(config)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class EmpathyRulesRequest(BaseModel):
+    frustrated_threshold: float
+    frustrated_mode: str
+    confused_threshold: float
+    confused_mode: str
+
+
+@admin_router.get("/empathy/rules", tags=["Reinforcement Learning"])
+async def get_empathy_rules_endpoint():
+    """Retrieve active sentiment-based empathy override thresholds."""
+    try:
+        from core.orchestration.empathy_adapter import get_empathy_rules
+        data = await get_empathy_rules()
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/empathy/rules", tags=["Reinforcement Learning"])
+async def save_empathy_rules_endpoint(payload: EmpathyRulesRequest):
+    """Save active sentiment-based empathy override rules configurations."""
+    try:
+        from core.orchestration.empathy_adapter import get_empathy_rules, save_empathy_rules
+        config = await get_empathy_rules()
+        config["frustrated_threshold"] = payload.frustrated_threshold
+        config["frustrated_mode"] = payload.frustrated_mode
+        config["confused_threshold"] = payload.confused_threshold
+        config["confused_mode"] = payload.confused_mode
+        await save_empathy_rules(config)
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -20,10 +20,15 @@ def test_websocket_connection_and_broadcast():
 
         # 2. Test event broadcasting
         import asyncio
-        asyncio.run(ws_manager.broadcast({
-            "event": "test_event",
-            "data": {"status": "ok"}
-        }))
+        loop = ws_manager.active_connections[0].custom_loop
+        future = asyncio.run_coroutine_threadsafe(
+            ws_manager.broadcast({
+                "event": "test_event",
+                "data": {"status": "ok"}
+            }),
+            loop
+        )
+        future.result()
 
         # Read broadcast message
         data = websocket.receive_json()

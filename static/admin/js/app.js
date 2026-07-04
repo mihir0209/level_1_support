@@ -212,6 +212,7 @@ function app() {
     llmConfig: { primary_model: '', fallback_model: '', cumulative_costs_usd: 0.0, cumulative_savings_usd: 0.0, rate_limit_mitigations: 0 },
     ws: null,
     wsInterval: null,
+    empathyRules: { frustrated_threshold: 0.35, frustrated_mode: 'friendly', confused_threshold: 0.55, confused_mode: 'professional', override_activations: 0 },
 
     // ════════════════════════════════════════════════════════════════
     // LIFECYCLE
@@ -227,6 +228,7 @@ function app() {
       await this.loadCRMLogs();
       await this.loadSimResults();
       await this.loadLLMConfig();
+      await this.loadEmpathyRules();
       this.connectWS();
       setInterval(() => this.refreshMonitoring(), 15000);
       window.addEventListener('popstate', () => this.syncFromUrl());
@@ -1096,6 +1098,39 @@ function app() {
       }
     },
 
+    // ── EMPATHY ROUTING RULES ────────────────────────────────────
+    async loadEmpathyRules() {
+      try {
+        const d = await this.api('/empathy/rules');
+        this.empathyRules = d || { frustrated_threshold: 0.35, frustrated_mode: 'friendly', confused_threshold: 0.55, confused_mode: 'professional', override_activations: 0 };
+      } catch (_) {
+        this.empathyRules = { frustrated_threshold: 0.35, frustrated_mode: 'friendly', confused_threshold: 0.55, confused_mode: 'professional', override_activations: 0 };
+      }
+    },
+
+    async saveEmpathyRules() {
+      try {
+        await this.api('/empathy/rules', {
+          method: 'POST',
+          body: JSON.stringify({
+            frustrated_threshold: parseFloat(this.empathyRules.frustrated_threshold),
+            frustrated_mode: this.empathyRules.frustrated_mode,
+            confused_threshold: parseFloat(this.empathyRules.confused_threshold),
+            confused_mode: this.empathyRules.confused_mode
+          })
+        });
+        this.toast('Empathy dynamic override rules updated!', 'toast-success');
+        await this.loadEmpathyRules();
+      } catch (e) {
+        this.toast('Save rules failed: ' + e.message, 'toast-error');
+      }
+    },
+
+    async resetRLStats() {
+      try {
+        await this.api('/rl/reset', { method: 'POST' });
+        this.toast('Reinforcement learning arms reset successfully!', 'toast-success');
+        await this.loadRLStats();
       } catch (e) {
         this.toast('Reset failed: ' + e.message, 'toast-error');
       }

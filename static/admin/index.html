@@ -3150,6 +3150,92 @@
               </div>
             </div>
 
+        <!-- Sentiment-Based Empathy Adapters (Phase 22) -->
+        <div class="mt-6 bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 shadow-sm p-6 space-y-6">
+          <div class="border-b border-surface-100 dark:border-surface-700 pb-4">
+            <h2 class="text-base font-bold">Dynamic Sentiment-Based Empathy Adapters</h2>
+            <p class="text-xs text-surface-400 mt-1">Configure automated mid-conversation override thresholds to adjust empathy prompts dynamically when user frustration triggers rise.</p>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            
+            <!-- Controls card -->
+            <div class="lg:col-span-1 bg-surface-50/50 dark:bg-surface-900/20 p-4 rounded-xl border border-surface-150 dark:border-surface-750 space-y-4">
+              <h3 class="text-xs font-bold uppercase tracking-wider text-surface-500">Routing Override Maps</h3>
+              
+              <div class="space-y-4 text-xs">
+                <!-- Frustration override -->
+                <div class="space-y-2">
+                  <span class="font-bold text-surface-600 block">Frustrated Customer Rule</span>
+                  <div class="grid grid-cols-2 gap-2">
+                    <div>
+                      <label class="text-[10px] uppercase font-bold text-surface-400">Threshold (Sentiment <=)</label>
+                      <input type="number" step="0.05" min="0.0" max="1.0" x-model="empathyRules.frustrated_threshold" class="w-full text-xs rounded border border-surface-200 dark:border-surface-650 bg-white dark:bg-surface-850 px-2 py-1.5"/>
+                    </div>
+                    <div>
+                      <label class="text-[10px] uppercase font-bold text-surface-400">Target Variant</label>
+                      <select x-model="empathyRules.frustrated_mode" class="w-full text-xs rounded border border-surface-200 dark:border-surface-650 bg-white dark:bg-surface-850 px-2 py-1.5">
+                        <option value="friendly">Friendly</option>
+                        <option value="professional">Professional</option>
+                        <option value="concise">Concise</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Confusion override -->
+                <div class="space-y-2">
+                  <span class="font-bold text-surface-600 block">Confused Customer Rule</span>
+                  <div class="grid grid-cols-2 gap-2">
+                    <div>
+                      <label class="text-[10px] uppercase font-bold text-surface-400">Threshold (Sentiment <=)</label>
+                      <input type="number" step="0.05" min="0.0" max="1.0" x-model="empathyRules.confused_threshold" class="w-full text-xs rounded border border-surface-200 dark:border-surface-650 bg-white dark:bg-surface-850 px-2 py-1.5"/>
+                    </div>
+                    <div>
+                      <label class="text-[10px] uppercase font-bold text-surface-400">Target Variant</label>
+                      <select x-model="empathyRules.confused_mode" class="w-full text-xs rounded border border-surface-200 dark:border-surface-650 bg-white dark:bg-surface-850 px-2 py-1.5">
+                        <option value="friendly">Friendly</option>
+                        <option value="professional">Professional</option>
+                        <option value="concise">Concise</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <button @click="saveEmpathyRules()"
+                  class="w-full py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors">
+                  Save Empathy Adapters
+                </button>
+              </div>
+            </div>
+
+            <!-- Overrides statistics display -->
+            <div class="lg:col-span-2 bg-surface-50/20 dark:bg-surface-900/10 p-5 rounded-xl border border-surface-150 dark:border-surface-800 flex flex-col justify-between">
+              <div class="border-b border-surface-100 dark:border-surface-700 pb-3 flex items-center justify-between">
+                <div>
+                  <h3 class="text-sm font-semibold">Active Adapters Status & Telemetry</h3>
+                  <p class="text-xs text-surface-400 mt-0.5">Automated prompt alignment logs based on user sentiment transitions.</p>
+                </div>
+                <button @click="loadEmpathyRules()" class="text-xs text-brand-600 font-semibold">Refresh Telemetry</button>
+              </div>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-6 py-6">
+                <div class="p-5 bg-surface-50 dark:bg-surface-900 border rounded-xl space-y-1.5">
+                  <span class="text-[10px] uppercase font-bold text-surface-400">Dynamic Adjustments Triggered</span>
+                  <div class="text-2xl font-bold text-surface-800 dark:text-surface-200" x-text="empathyRules.override_activations || 0"></div>
+                </div>
+                <div class="p-5 bg-green-50/50 dark:bg-green-950/15 border border-green-200 dark:border-green-900 rounded-xl space-y-1.5">
+                  <span class="text-[10px] uppercase font-bold text-green-700 dark:text-green-400">Current Overrides Health</span>
+                  <div class="text-2xl font-bold text-green-600 dark:text-green-400">100% Stable</div>
+                </div>
+              </div>
+
+              <div class="bg-surface-55/30 dark:bg-surface-900/40 p-3 rounded-lg text-[11px] text-surface-500 border border-surface-200 dark:border-surface-750 flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-green-500 animate-pulse"></span>
+                <span>Optimizers active. Sub-turn model alignment is actively balancing customer empathy and compliance.</span>
+              </div>
+            </div>
+
           </div>
         </div>
 

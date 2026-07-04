@@ -25,7 +25,7 @@ async def test_fallback_config_store(monkeypatch):
             db_store[key] = val
             return True
 
-    monkeypatch.setattr("core.orchestration.fallback_coordinator.get_redis", lambda: MockRedis())
+    monkeypatch.setattr("core.memory.session.get_redis", lambda: MockRedis())
 
     # Save custom config
     custom = {
@@ -59,7 +59,7 @@ async def test_fallback_triggers_and_costing(monkeypatch):
             db_store[key] = str(val + amount)
             return val + amount
 
-    monkeypatch.setattr("core.orchestration.fallback_coordinator.get_redis", lambda: MockRedis())
+    monkeypatch.setattr("core.memory.session.get_redis", lambda: MockRedis())
 
     # 1. Run compliant case without failures
     res_ok = await call_llm_with_fallback(
@@ -93,7 +93,7 @@ async def test_fallback_api_routes(monkeypatch):
             db_store[key] = val
             return True
 
-    monkeypatch.setattr("core.orchestration.fallback_coordinator.get_redis", lambda: MockRedis())
+    monkeypatch.setattr("core.memory.session.get_redis", lambda: MockRedis())
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
