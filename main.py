@@ -125,6 +125,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("feedback_consumer_start_failed", error=str(e))
 
+    # Start metrics broadcaster (Phase 24)
+    try:
+        from core.orchestration.metrics_broadcaster import start_metrics_broadcaster
+        await start_metrics_broadcaster()
+    except Exception as e:
+        log.warning("metrics_broadcaster_start_failed", error=str(e))
+
     # Register demo tools API
     from core.tools.api import router as demo_router
     app.include_router(demo_router)
@@ -134,6 +141,13 @@ async def lifespan(app: FastAPI):
     # Graceful shutdown — drain in-flight requests before exiting
     log.info("shutdown_initiated")
     _shutdown_requested = True
+
+    # Stop metrics broadcaster (Phase 24)
+    try:
+        from core.orchestration.metrics_broadcaster import stop_metrics_broadcaster
+        await stop_metrics_broadcaster()
+    except Exception:
+        pass
 
     # Shutdown scheduler
     try:

@@ -605,6 +605,12 @@ function app() {
     // ════════════════════════════════════════════════════════════════
     async refreshMonitoring() {
       try {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          await this.refreshSessions();
+          await this.loadInboundCalls();
+          await this.loadVoiceCalls();
+          return;
+        }
         const [ov, rels, summary, jobs] = await Promise.allSettled([
           this.api('/admin/overview'),
           this.api('/admin/graph/relationships'),
@@ -1553,6 +1559,29 @@ function app() {
             if (msg.event === 'safety_alert') {
               this.safetyAlerts.unshift(msg.data);
               this.toast(`Security Alert: Blocked attack payload in session ${msg.data.session_id}`, 'toast-error');
+            }
+            
+            if (msg.event === 'system_metrics') {
+              const d = msg.data;
+              if (d.overview) {
+                const o = d.overview;
+                this.metrics = [
+                  { label: 'Registered Brands', value: o.registered_brands || 0, sub: 'across platform' },
+                  { label: 'Active Sessions',   value: o.active_sessions || 0,    sub: 'in Redis' },
+                  { label: 'Graph Nodes',        value: (o.knowledge_graph?.nodes_by_label || []).reduce((a, n) => a + n.count, 0), sub: 'in FalkorDB' },
+                  { label: 'KB Chunks',          value: Object.values(o.postgres_kb || {}).reduce((a, c) => a + c, 0), sub: 'in pgvector' },
+                ];
+                if (o.knowledge_graph) {
+                  this.graphStats.nodes = o.knowledge_graph.nodes_by_label || [];
+                  this.graphStats.maxCount = Math.max(...(o.knowledge_graph.nodes_by_label || []).map(n => n.count), 1);
+                }
+              }
+              if (d.relationships) {
+                this.graphStats.relationships = d.relationships;
+              }
+              if (d.jobs) {
+                this.ingestionJobs = d.jobs;
+              }
             }
           } catch (_) {}
         };
