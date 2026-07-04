@@ -1621,6 +1621,36 @@ async def export_sessions_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class LLMFallbackRequest(BaseModel):
+    primary_model: str
+    fallback_model: str
+
+
+@admin_router.get("/llm/fallback", tags=["Integrations"])
+async def get_llm_fallback_endpoint():
+    """Retrieve fallback sequences, prices and cumulative API metrics."""
+    try:
+        from core.orchestration.fallback_coordinator import get_gateway_analytics
+        data = await get_gateway_analytics()
+        return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/llm/fallback", tags=["Integrations"])
+async def save_llm_fallback_endpoint(payload: LLMFallbackRequest):
+    """Update primary/fallback priorities and route configurations."""
+    try:
+        from core.orchestration.fallback_coordinator import get_fallback_config, save_fallback_config
+        config = await get_fallback_config()
+        config["primary_model"] = payload.primary_model
+        config["fallback_model"] = payload.fallback_model
+        await save_fallback_config(config)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Graph endpoints ───────────────────────────────────────────────────────────
 @admin_router.get("/graph/summary", tags=["Graph"])
 async def graph_summary():

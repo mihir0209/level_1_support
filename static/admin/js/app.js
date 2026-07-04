@@ -209,6 +209,7 @@ function app() {
     exportViolation: '',
     exportFormat: 'jsonl',
     exportLimit: 100,
+    llmConfig: { primary_model: '', fallback_model: '', cumulative_costs_usd: 0.0, cumulative_savings_usd: 0.0, rate_limit_mitigations: 0 },
 
     // ════════════════════════════════════════════════════════════════
     // LIFECYCLE
@@ -223,6 +224,7 @@ function app() {
       await this.loadCRMConfig();
       await this.loadCRMLogs();
       await this.loadSimResults();
+      await this.loadLLMConfig();
       setInterval(() => this.refreshMonitoring(), 15000);
       window.addEventListener('popstate', () => this.syncFromUrl());
     },
@@ -1031,6 +1033,32 @@ function app() {
         this.crmLogs = d.items || [];
       } catch (_) {
         this.crmLogs = [];
+      }
+    },
+
+    // ── LLM FALLBACK GATEWAY ─────────────────────────────────────
+    async loadLLMConfig() {
+      try {
+        const d = await this.api('/llm/fallback');
+        this.llmConfig = d || { primary_model: '', fallback_model: '', cumulative_costs_usd: 0.0, cumulative_savings_usd: 0.0, rate_limit_mitigations: 0 };
+      } catch (_) {
+        this.llmConfig = { primary_model: '', fallback_model: '', cumulative_costs_usd: 0.0, cumulative_savings_usd: 0.0, rate_limit_mitigations: 0 };
+      }
+    },
+
+    async saveLLMConfig() {
+      try {
+        await this.api('/llm/fallback', {
+          method: 'POST',
+          body: JSON.stringify({
+            primary_model: this.llmConfig.primary_model,
+            fallback_model: this.llmConfig.fallback_model
+          })
+        });
+        this.toast('LLM gateway routing preferences updated!', 'toast-success');
+        await this.loadLLMConfig();
+      } catch (e) {
+        this.toast('Save failed: ' + e.message, 'toast-error');
       }
     },
 
