@@ -1319,6 +1319,64 @@
         </div>
       </template>
 
+      <!-- Session Archive Export & Compliance Reporting (Phase 19) -->
+      <div class="mb-6 bg-white dark:bg-surface-800 rounded-xl border border-surface-200 dark:border-surface-700 shadow-sm p-5 space-y-4">
+        <div class="border-b border-surface-100 dark:border-surface-700 pb-3 flex items-center justify-between">
+          <div>
+            <h2 class="text-sm font-bold text-surface-850 dark:text-surface-200">Compliance Reporting & Archiving Console</h2>
+            <p class="text-xs text-surface-400 mt-0.5">Filter, stream, and archive compliance dialogue transcripts directly to your device.</p>
+          </div>
+          <span class="px-2 py-0.5 rounded bg-brand-50 text-brand-700 dark:bg-brand-950/20 dark:text-brand-400 text-[10px] font-bold uppercase tracking-wider">Export Manager</span>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-4 text-xs">
+          <!-- Brand filter selector -->
+          <div class="flex flex-col gap-1.5">
+            <label class="text-[11px] font-bold text-surface-450 uppercase tracking-wide">Brand ID</label>
+            <select x-model="exportBrand" class="pl-3 pr-8 py-2 rounded-lg border border-surface-200 dark:border-surface-650 bg-white dark:bg-surface-800 text-xs">
+              <option value="">All Brands</option>
+              <template x-for="b in brands" :key="b.brand_id">
+                <option :value="b.brand_id" x-text="b.name"></option>
+              </template>
+            </select>
+          </div>
+
+          <!-- Violation filter selector -->
+          <div class="flex flex-col gap-1.5">
+            <label class="text-[11px] font-bold text-surface-450 uppercase tracking-wide">Violation Filter</label>
+            <select x-model="exportViolation" class="pl-3 pr-8 py-2 rounded-lg border border-surface-200 dark:border-surface-650 bg-white dark:bg-surface-800 text-xs">
+              <option value="">All Audits</option>
+              <option value="prompt_injection">Prompt Injections</option>
+              <option value="policy_violation">Policy Violations</option>
+            </select>
+          </div>
+
+          <!-- Export limit input -->
+          <div class="flex flex-col gap-1.5">
+            <label class="text-[11px] font-bold text-surface-450 uppercase tracking-wide">Record Limit</label>
+            <input type="number" x-model="exportLimit" class="px-3 py-2 rounded-lg border border-surface-200 dark:border-surface-650 bg-white dark:bg-surface-800 text-xs"/>
+          </div>
+
+          <!-- Format selector -->
+          <div class="flex flex-col gap-1.5">
+            <label class="text-[11px] font-bold text-surface-450 uppercase tracking-wide">Export Format</label>
+            <select x-model="exportFormat" class="pl-3 pr-8 py-2 rounded-lg border border-surface-200 dark:border-surface-650 bg-white dark:bg-surface-800 text-xs">
+              <option value="jsonl">JSON Lines (.jsonl)</option>
+              <option value="csv">Comma-Separated (.csv)</option>
+            </select>
+          </div>
+
+          <!-- Export Button -->
+          <div class="flex flex-col justify-end">
+            <button @click="triggerExport()"
+              class="w-full py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg font-semibold transition-colors flex items-center justify-center gap-1.5 shadow-sm text-xs">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+              Export Sessions
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Main Dual-Pane layout -->
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
         

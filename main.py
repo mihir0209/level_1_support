@@ -1594,6 +1594,33 @@ async def get_simulation_results_endpoint():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@admin_router.get("/reporting/export", tags=["Reporting"])
+async def export_sessions_endpoint(
+    brand_id: str | None = None,
+    violation_filter: str | None = None,
+    format_type: str = "jsonl",
+    limit: int = 200
+):
+    """Compile and export conversation audit history as CSV or JSON Lines file attachment."""
+    try:
+        from fastapi import Response
+        from core.reporting.exporter import generate_archive_export
+        content, media_type = await generate_archive_export(
+            brand_id=brand_id,
+            violation_filter=violation_filter,
+            format_type=format_type,
+            limit=limit
+        )
+        filename = f"session_export_{int(time.time())}.{format_type}"
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ── Graph endpoints ───────────────────────────────────────────────────────────
 @admin_router.get("/graph/summary", tags=["Graph"])
 async def graph_summary():

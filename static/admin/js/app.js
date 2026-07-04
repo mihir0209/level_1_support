@@ -205,6 +205,10 @@ function app() {
     simNumRuns: 10,
     simMix: { cooperative: 40, frustrated: 30, confused: 30 },
     simLoading: false,
+    exportBrand: '',
+    exportViolation: '',
+    exportFormat: 'jsonl',
+    exportLimit: 100,
 
     // ════════════════════════════════════════════════════════════════
     // LIFECYCLE
@@ -1364,6 +1368,33 @@ function app() {
         this.safetyAlerts = [];
       } finally {
         this.safetyLoading = false;
+      }
+    },
+
+    async triggerExport() {
+      try {
+        const query = `?brand_id=${encodeURIComponent(this.exportBrand)}&violation_filter=${encodeURIComponent(this.exportViolation)}&format_type=${this.exportFormat}&limit=${this.exportLimit}`;
+        const path = `/admin/reporting/export` + query;
+        
+        const res = await fetch(window.location.origin + path, {
+          headers: {
+            'X-ADMIN-KEY': this.adminKey
+          }
+        });
+        if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+        
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `session_export_${Date.now()}.${this.exportFormat}`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+        this.toast('Session archive exported successfully!', 'toast-success');
+      } catch (e) {
+        this.toast('Export failed: ' + e.message, 'toast-error');
       }
     },
 
