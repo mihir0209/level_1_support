@@ -880,10 +880,43 @@ async def chat(req: ChatRequest, request: Request = None):
                 messages=updated_messages
             ))
 
+            # ── CRM Ticket Syncing (Phase 17) ──
+            from core.crm.ticket_sync import sync_session_to_crm
+            asyncio.create_task(sync_session_to_crm(
+                session_id=req.session_id,
+                brand_id=brand_id,
+                session_data={
+                    "messages": updated_messages,
+                    "turn_count": turn_count,
+                    "outcome": "resolved",
+                    "escalation_risk": risk_score,
+                    "compliance_score": result_state.get("compliance_score", 1.0),
+                    "compliance_violations": result_state.get("compliance_violations"),
+                    "sla_status": sla_status
+                }
+            ))
+
             await update_session(req.session_id, {"rl_feedback_registered": True})
         elif is_escalated:
             from core.orchestration.rl_engine import register_feedback
             await register_feedback("empathy_mode", empathy_mode, 0)
+
+            # ── CRM Ticket Syncing (Phase 17) ──
+            from core.crm.ticket_sync import sync_session_to_crm
+            asyncio.create_task(sync_session_to_crm(
+                session_id=req.session_id,
+                brand_id=brand_id,
+                session_data={
+                    "messages": updated_messages,
+                    "turn_count": turn_count,
+                    "outcome": "escalated",
+                    "escalation_risk": risk_score,
+                    "compliance_score": result_state.get("compliance_score", 1.0),
+                    "compliance_violations": result_state.get("compliance_violations"),
+                    "sla_status": sla_status
+                }
+            ))
+
             await update_session(req.session_id, {"rl_feedback_registered": True})
 
     latency_ms = (time.monotonic() - t_start) * 1000
@@ -1488,6 +1521,44 @@ async def get_safety_alerts(limit: int = 50, offset: int = 0):
         items = logs_res.get("items", [])
         safety_alerts = [item for item in items if item.get("compliance_violations") == "prompt_injection"]
         return {"count": len(safety_alerts), "items": safety_alerts[:limit]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class CRMConfigRequest(BaseModel):
+    webhook_url: str
+    auth_token: str
+
+
+@admin_router.get("/crm/config", tags=["Integrations"])
+async def get_crm_config_endpoint():
+    """Retrieve external CRM webhook URL and auth token details."""
+    try:
+        from core.crm.ticket_sync import get_crm_config
+        config = await get_crm_config()
+        return config
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/crm/config", tags=["Integrations"])
+async def save_crm_config_endpoint(payload: CRMConfigRequest):
+    """Save external CRM connection webhook URL and auth token details."""
+    try:
+        from core.crm.ticket_sync import save_crm_config
+        await save_crm_config(payload.webhook_url, payload.auth_token)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/crm/logs", tags=["Integrations"])
+async def get_crm_logs_endpoint():
+    """Retrieve a list of recent CRM sync audits and statuses."""
+    try:
+        from core.crm.ticket_sync import get_crm_sync_logs
+        logs = await get_crm_sync_logs()
+        return {"count": len(logs), "items": logs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

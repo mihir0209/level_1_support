@@ -191,6 +191,8 @@ function app() {
     newInt: { name: '', url: '', description: '', type: 'mcp', authHeader: '' },
     intProbeResult: null,
     toolBreakers: [],
+    crmConfig: { webhook_url: '', auth_token: '' },
+    crmLogs: [],
 
     // ── VOICE ───────────────────────────────────────────────────
     voiceCalls: [],
@@ -209,6 +211,8 @@ function app() {
       await this.checkHealth();
       this.refreshMonitoring();
       await this.loadRLStats();
+      await this.loadCRMConfig();
+      await this.loadCRMLogs();
       setInterval(() => this.refreshMonitoring(), 15000);
       window.addEventListener('popstate', () => this.syncFromUrl());
     },
@@ -985,6 +989,38 @@ function app() {
         await this.loadToolBreakers();
       } catch (e) {
         this.toast('Reset failed: ' + e.message, 'toast-error');
+      }
+    },
+
+    // ── CRM TICKETING SYNC ────────────────────────────────────────
+    async loadCRMConfig() {
+      try {
+        const d = await this.api('/crm/config');
+        this.crmConfig = d || { webhook_url: '', auth_token: '' };
+      } catch (_) {
+        this.crmConfig = { webhook_url: '', auth_token: '' };
+      }
+    },
+
+    async saveCRMConfig() {
+      try {
+        await this.api('/crm/config', {
+          method: 'POST',
+          body: JSON.stringify(this.crmConfig)
+        });
+        this.toast('CRM connection configuration updated!', 'toast-success');
+        await this.loadCRMConfig();
+      } catch (e) {
+        this.toast('Save failed: ' + e.message, 'toast-error');
+      }
+    },
+
+    async loadCRMLogs() {
+      try {
+        const d = await this.api('/crm/logs');
+        this.crmLogs = d.items || [];
+      } catch (_) {
+        this.crmLogs = [];
       }
     },
 
