@@ -200,6 +200,11 @@ function app() {
     voiceLoading: false,
     voiceResult: null,
     rlStats: [],
+    simRuns: [],
+    simActiveMode: 'professional',
+    simNumRuns: 10,
+    simMix: { cooperative: 40, frustrated: 30, confused: 30 },
+    simLoading: false,
 
     // ════════════════════════════════════════════════════════════════
     // LIFECYCLE
@@ -213,6 +218,7 @@ function app() {
       await this.loadRLStats();
       await this.loadCRMConfig();
       await this.loadCRMLogs();
+      await this.loadSimResults();
       setInterval(() => this.refreshMonitoring(), 15000);
       window.addEventListener('popstate', () => this.syncFromUrl());
     },
@@ -1055,13 +1061,47 @@ function app() {
       }
     },
 
-    async resetRLStats() {
-      try {
-        await this.api('/rl/reset', { method: 'POST' });
-        this.toast('RL statistics reset to uniform Beta priors!', 'toast-success');
-        await this.loadRLStats();
       } catch (e) {
         this.toast('Reset failed: ' + e.message, 'toast-error');
+      }
+    },
+
+    // ── PROMPT SIMULATOR ──────────────────────────────────────────
+    async loadSimResults() {
+      try {
+        const d = await this.api('/simulator/results');
+        this.simRuns = d.items || [];
+      } catch (_) {
+        this.simRuns = [];
+      }
+    },
+
+    async runSimulation() {
+      this.simLoading = true;
+      try {
+        // Convert integer percentages to floats summing to 1.0
+        const total = (this.simMix.cooperative || 0) + (this.simMix.frustrated || 0) + (this.simMix.confused || 0);
+        const mix = {
+          cooperative: Math.round(((this.simMix.cooperative || 0) / total) * 100) / 100,
+          frustrated: Math.round(((this.simMix.frustrated || 0) / total) * 100) / 100,
+          confused: Math.round(((this.simMix.confused || 0) / total) * 100) / 100
+        };
+
+        await this.api('/simulator/run', {
+          method: 'POST',
+          body: JSON.stringify({
+            empathy_mode: this.simActiveMode,
+            num_runs: parseInt(this.simNumRuns) || 10,
+            persona_mix: mix
+          })
+        });
+
+        this.toast(`Simulation batch completed successfully for '${this.simActiveMode}'!`, 'toast-success');
+        await this.loadSimResults();
+      } catch (e) {
+        this.toast('Simulation failed: ' + e.message, 'toast-error');
+      } finally {
+        this.simLoading = false;
       }
     },
 

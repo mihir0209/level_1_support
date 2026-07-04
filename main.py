@@ -873,7 +873,6 @@ async def chat(req: ChatRequest, request: Request = None):
 
             # ── Online Live KG Fact Enrichment loop ──
             from core.ontology.enricher import extract_and_propose_facts
-            import asyncio
             asyncio.create_task(extract_and_propose_facts(
                 session_id=req.session_id,
                 brand_id=brand_id,
@@ -1559,6 +1558,38 @@ async def get_crm_logs_endpoint():
         from core.crm.ticket_sync import get_crm_sync_logs
         logs = await get_crm_sync_logs()
         return {"count": len(logs), "items": logs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SimulationRunRequest(BaseModel):
+    empathy_mode: str
+    num_runs: int = 10
+    persona_mix: dict[str, float] = {"cooperative": 0.4, "frustrated": 0.3, "confused": 0.3}
+
+
+@admin_router.post("/simulator/run", tags=["Reinforcement Learning"])
+async def run_simulation_endpoint(payload: SimulationRunRequest):
+    """Execute a batch conversation simulation for the specified empathy mode."""
+    try:
+        from core.orchestration.simulator import run_batch_simulation
+        results = await run_batch_simulation(
+            empathy_mode=payload.empathy_mode,
+            num_runs=payload.num_runs,
+            persona_mix=payload.persona_mix
+        )
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/simulator/results", tags=["Reinforcement Learning"])
+async def get_simulation_results_endpoint():
+    """Retrieve history of completed simulation run results."""
+    try:
+        from core.orchestration.simulator import get_simulation_results
+        results = await get_simulation_results()
+        return {"count": len(results), "items": results}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
