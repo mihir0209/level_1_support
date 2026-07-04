@@ -31,7 +31,7 @@ warnings.filterwarnings("ignore", message=".*renamed to.*ddgs.*", category=Runti
 
 import structlog
 from typing import Annotated
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Header, Path, Query
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Header, Path, Query, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from starlette.responses import PlainTextResponse, FileResponse
@@ -1786,6 +1786,62 @@ async def save_empathy_rules_endpoint(payload: EmpathyRulesRequest):
         config["confused_threshold"] = payload.confused_threshold
         config["confused_mode"] = payload.confused_mode
         await save_empathy_rules(config)
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Voice Inbound IVR Endpoints ──
+@admin_router.post("/voice/inbound", tags=["Voice"])
+async def voice_inbound_endpoint(
+    CallSid: str = Form(...),
+    From: str = Form(...)
+):
+    """Webhook handling inbound call greetings and option gathers."""
+    try:
+        from fastapi import Response, Form
+        from core.voice.ivr_router import generate_inbound_twiml, register_inbound_call
+        await register_inbound_call(CallSid, From)
+        action_url = "/admin/voice/inbound/gather"
+        twiml = generate_inbound_twiml(action_url)
+        return Response(content=twiml, media_type="application/xml")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/voice/inbound/gather", tags=["Voice"])
+async def voice_inbound_gather_endpoint(
+    CallSid: str = Form(...),
+    Digits: str = Form(...)
+):
+    """Webhook handling caller keypress gathers and routing dial responses."""
+    try:
+        from fastapi import Response, Form
+        from core.voice.ivr_router import generate_gather_twiml, update_inbound_call_digit
+        await update_inbound_call_digit(CallSid, Digits)
+        twiml = generate_gather_twiml(Digits)
+        return Response(content=twiml, media_type="application/xml")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/voice/inbound/active", tags=["Voice"])
+async def voice_active_inbound_endpoint():
+    """Retrieve all active tracked inbound calls."""
+    try:
+        from core.voice.ivr_router import get_active_inbound_calls
+        calls = await get_active_inbound_calls()
+        return {"items": calls}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/voice/inbound/hangup", tags=["Voice"])
+async def voice_inbound_hangup_endpoint(call_sid: str):
+    """Simulate client hangup and remove tracking record from memory."""
+    try:
+        from core.voice.ivr_router import remove_inbound_call
+        await remove_inbound_call(call_sid)
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

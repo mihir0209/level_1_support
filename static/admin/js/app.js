@@ -213,6 +213,7 @@ function app() {
     ws: null,
     wsInterval: null,
     empathyRules: { frustrated_threshold: 0.35, frustrated_mode: 'friendly', confused_threshold: 0.55, confused_mode: 'professional', override_activations: 0 },
+    inboundCalls: [],
 
     // ════════════════════════════════════════════════════════════════
     // LIFECYCLE
@@ -229,6 +230,7 @@ function app() {
       await this.loadSimResults();
       await this.loadLLMConfig();
       await this.loadEmpathyRules();
+      await this.loadInboundCalls();
       this.connectWS();
       setInterval(() => this.refreshMonitoring(), 15000);
       window.addEventListener('popstate', () => this.syncFromUrl());
@@ -634,6 +636,8 @@ function app() {
         }
 
         await this.refreshSessions();
+        await this.loadInboundCalls();
+        await this.loadVoiceCalls();
         this.intentDist = [
           { name: 'WISMO',    count: Math.floor(Math.random() * 40) + 10 },
           { name: 'Returns', count: Math.floor(Math.random() * 30) + 5 },
@@ -1086,6 +1090,25 @@ function app() {
         await this.loadVoiceCalls();
       } catch (e) { this.toast('Voice call failed: ' + e.message, 'toast-error'); }
       finally { this.voiceLoading = false; }
+    },
+
+    async loadInboundCalls() {
+      try {
+        const d = await this.api('/voice/inbound/active');
+        this.inboundCalls = d.items || [];
+      } catch (_) {
+        this.inboundCalls = [];
+      }
+    },
+
+    async hangupInboundCall(callSid) {
+      try {
+        await this.api(`/voice/inbound/hangup?call_sid=${callSid}`, { method: 'POST' });
+        this.toast('Inbound call terminated.', 'toast-success');
+        await this.loadInboundCalls();
+      } catch (e) {
+        this.toast('Termination failed: ' + e.message, 'toast-error');
+      }
     },
 
     // ── REINFORCEMENT LEARNING ────────────────────────────────────
