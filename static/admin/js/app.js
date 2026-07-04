@@ -542,6 +542,22 @@ function app() {
       }
     },
 
+    async snoozeSLA(sessionId) {
+      try {
+        await this.api('/admin/sla/snooze', {
+          method: 'POST',
+          body: JSON.stringify({ session_id: sessionId })
+        });
+        if (this.sessionDetail && this.sessionDetail.session_id === sessionId) {
+          this.sessionDetail.sla_status = 'ok';
+        }
+        await this.refreshSessions();
+        this.toast('SLA compliance warning snoozed!', 'toast-success');
+      } catch (e) {
+        this.toast('Snooze failed: ' + e.message, 'toast-error');
+      }
+    },
+
     async sendTakeoverMessage(sessionId, message) {
       if (!message.trim()) return;
       try {

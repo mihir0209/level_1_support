@@ -317,6 +317,7 @@ class ChatResponse(BaseModel):
     escalation_risk: float = 0.0
     is_takeover: bool = False
     sub_tasks: list[dict] = []
+    sla_status: str = "ok"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -715,7 +716,8 @@ async def chat(req: ChatRequest, request: Request = None):
             current_sentiment="frustrated",
             escalation_risk=1.0,
             is_takeover=False,
-            sub_tasks=[]
+            sub_tasks=[],
+            sla_status="ok"
         )
 
     # 1. Takeover Bypass Logic
@@ -835,6 +837,14 @@ async def chat(req: ChatRequest, request: Request = None):
         resolution_attempts=resolution_attempts
     )
 
+    # ── SLA Compliance Tracking (Phase 16) ──
+    from core.orchestration.sla_monitor import check_sla_status
+    sla_status = await check_sla_status(
+        session_id=req.session_id,
+        turn_count=turn_count,
+        escalation_risk=risk_score
+    )
+
     await update_session(req.session_id, {
         "messages": updated_messages,
         "turn_count": turn_count,
@@ -852,6 +862,7 @@ async def chat(req: ChatRequest, request: Request = None):
         "is_takeover": False,
         "escalation_risk": risk_score,
         "sub_tasks": tasks,
+        "sla_status": sla_status,
     })
 
     # ── Online Live RL Feedback Registration ──────────────────────────
@@ -910,6 +921,7 @@ async def chat(req: ChatRequest, request: Request = None):
         escalation_risk=risk_score,
         is_takeover=False,
         sub_tasks=tasks,
+        sla_status=sla_status,
     )
 
 
@@ -2057,8 +2069,57 @@ async def list_sessions(brand_id: Annotated[str | None, Query(max_length=64)] = 
                     "created_at": d.get("created_at"),
                     "is_takeover": d.get("is_takeover", False),
                     "escalation_risk": d.get("escalation_risk", 0.0),
+                    "sla_status": d.get("sla_status", "ok"),
                 })
     return {"count": len(sessions), "sessions": sessions}
+
+
+@admin_router.get("/sla/alerts", tags=["Sessions"])
+async def get_sla_alerts(limit: int = 50):
+    """Retrieve all sessions with warning or breached SLA compliance flags."""
+    from core.memory.session import get_redis
+    import json
+    r = get_redis()
+    session_keys = []
+    async for key in r.scan_iter(match="session:*"):
+        session_keys.append(key)
+    alerts = []
+    for key in session_keys:
+        data = await r.get(key)
+        if data:
+            d = json.loads(data)
+            status = d.get("sla_status", "ok")
+            if status in ["warning", "breached"]:
+                alerts.append({
+                    "session_id": d.get("session_id"),
+                    "brand_id": d.get("brand_id"),
+                    "channel": d.get("channel"),
+                    "turn_count": d.get("turn_count", 0),
+                    "outcome": d.get("outcome"),
+                    "is_takeover": d.get("is_takeover", False),
+                    "escalation_risk": d.get("escalation_risk", 0.0),
+                    "sla_status": status
+                })
+    return {"count": len(alerts), "items": alerts[:limit]}
+
+
+class SnoozeSLARequest(BaseModel):
+    session_id: str
+
+
+@admin_router.post("/sla/snooze", tags=["Sessions"])
+async def snooze_sla_endpoint(payload: SnoozeSLARequest):
+    """Snooze or clear SLA alert flag on the specified session."""
+    session_data = await get_session(payload.session_id)
+    if not session_data:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    session_data["sla_status"] = "ok"
+    session_data["messages"].append({
+        "role": "system",
+        "content": "SLA compliance timer snoozed by human supervisor."
+    })
+    await update_session(payload.session_id, session_data)
+    return {"status": "success", "session_id": payload.session_id}
 
 
 @admin_router.get("/sessions/{session_id}", tags=["Sessions"])

@@ -655,7 +655,21 @@
               <template x-for="s in filteredSessions" :key="s.session_id">
                 <tr class="hover:bg-surface-50 dark:hover:bg-surface-900 transition-colors cursor-pointer"
                   @click="openSessionDetail(s.session_id)">
-                  <td class="px-4 py-3"><span class="mono text-xs" x-text="s.session_id"></span></td>
+                  <td class="px-4 py-3">
+                    <div class="flex items-center gap-2">
+                      <span class="mono text-xs" x-text="s.session_id"></span>
+                      <template x-if="s.sla_status === 'breached'">
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-red-600 text-white animate-pulse">
+                          SLA Breached
+                        </span>
+                      </template>
+                      <template x-if="s.sla_status === 'warning'">
+                        <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-yellow-500 text-white">
+                          SLA Warning
+                        </span>
+                      </template>
+                    </div>
+                  </td>
                   <td class="px-4 py-3">
                     <div class="flex items-center gap-1.5">
                       <span class="brand-dot"></span>
@@ -745,6 +759,22 @@
                 </button>
               </div>
             </div>
+
+            <!-- SLA Indicator & Snooze (Phase 16) -->
+            <template x-if="sessionDetail.sla_status && sessionDetail.sla_status !== 'ok'">
+              <div class="p-3 rounded-lg border flex items-center justify-between"
+                :class="sessionDetail.sla_status === 'breached' ? 'bg-red-50/50 border-red-200 text-red-900 dark:bg-red-950/10 dark:border-red-900/50 dark:text-red-400' : 'bg-yellow-50/50 border-yellow-250 text-yellow-900 dark:bg-yellow-950/10 dark:border-yellow-900/50 dark:text-yellow-400'">
+                <div class="flex items-center gap-2">
+                  <span class="inline-flex w-2.5 h-2.5 rounded-full"
+                    :class="sessionDetail.sla_status === 'breached' ? 'bg-red-600 animate-ping' : 'bg-yellow-500'"></span>
+                  <span class="font-bold uppercase tracking-wider text-[10px]" x-text="'SLA ' + sessionDetail.sla_status"></span>
+                </div>
+                <button @click="snoozeSLA(selectedSessId)"
+                  class="px-2.5 py-1 bg-white hover:bg-surface-50 dark:bg-surface-900 text-surface-850 border border-surface-250 dark:border-surface-700 rounded text-[11px] font-semibold transition-colors shadow-xs">
+                  Snooze Warning
+                </button>
+              </div>
+            </template>
 
             <!-- Risk scoring bar and status -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2.5 border-t border-surface-100 dark:border-surface-700">
