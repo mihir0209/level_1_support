@@ -98,6 +98,7 @@ class SessionMemory:
 
 async def create_session(brand_id: str, channel: str, customer_id: str | None = None) -> str:
     """Create a new session and persist its initial state to Redis."""
+    import time
     session_id = str(uuid.uuid4())
     mem = SessionMemory(session_id)
     await mem.save({
@@ -109,6 +110,7 @@ async def create_session(brand_id: str, channel: str, customer_id: str | None = 
         "turn_count": 0,
         "resolution_attempts": 0,
         "is_resolved": False,
+        "updated_at": time.time(),
     })
     log.info("session_created", session_id=session_id, brand_id=brand_id, channel=channel)
     return session_id
@@ -121,9 +123,11 @@ async def get_session(session_id: str) -> dict[str, Any] | None:
 
 @traced("memory.redis.update")
 async def update_session(session_id: str, updates: dict[str, Any]) -> None:
+    import time
     mem = SessionMemory(session_id)
     current = await mem.load() or {}
     current.update(updates)
+    current["updated_at"] = time.time()
     await mem.save(current)
 
 

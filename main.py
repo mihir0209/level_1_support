@@ -132,6 +132,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("metrics_broadcaster_start_failed", error=str(e))
 
+    # Start auto escalator background scanning worker (Phase 25)
+    try:
+        from core.orchestration.auto_escalator import start_auto_escalator
+        await start_auto_escalator()
+    except Exception as e:
+        log.warning("auto_escalator_start_failed", error=str(e))
+
     # Register demo tools API
     from core.tools.api import router as demo_router
     app.include_router(demo_router)
@@ -146,6 +153,13 @@ async def lifespan(app: FastAPI):
     try:
         from core.orchestration.metrics_broadcaster import stop_metrics_broadcaster
         await stop_metrics_broadcaster()
+    except Exception:
+        pass
+
+    # Stop auto escalator background scanning worker (Phase 25)
+    try:
+        from core.orchestration.auto_escalator import stop_auto_escalator
+        await stop_auto_escalator()
     except Exception:
         pass
 
@@ -1859,6 +1873,26 @@ async def voice_inbound_hangup_endpoint(call_sid: str):
         return {"status": "success"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class SMSNotificationRequest(BaseModel):
+    session_id: str
+    brand_id: str
+    inactivity_minutes: float
+    message: str
+
+
+@admin_router.post("/notifications/sms", tags=["System"])
+async def send_sms_notification_endpoint(payload: SMSNotificationRequest):
+    """Receive and simulate processing supervisor on-call SMS notifications."""
+    log.warning(
+        "sms_notification_dispatched_to_supervisor",
+        session_id=payload.session_id,
+        brand_id=payload.brand_id,
+        inactivity_minutes=payload.inactivity_minutes,
+        msg=payload.message
+    )
+    return {"status": "delivered"}
 
 
 # ── Graph endpoints ───────────────────────────────────────────────────────────
