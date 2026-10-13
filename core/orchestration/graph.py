@@ -1202,6 +1202,25 @@ async def node_close_session(state: L1SupportState) -> dict[str, Any]:
         except Exception as e:
             log.warning("graphiti_write_failed", session_id=state.session_id, error=str(e))
 
+    # Schedule CSAT Survey (Phase 28)
+    try:
+        from core.crm.csat import schedule_csat_survey
+        from core.memory.session import get_session
+        session_data = await get_session(state.session_id)
+        channel_val = session_data.get("channel") or "chat" if session_data else "chat"
+        await schedule_csat_survey(
+            session_id=state.session_id,
+            customer_id=state.customer_id,
+            brand_id=state.brand_id,
+            channel=channel_val,
+            intent=state.intent.issue_type if state.intent else None,
+            outcome="resolved",
+            resolution_id=state.current_resolution_id,
+            turn_count=state.turn_count,
+        )
+    except Exception as e:
+        log.warning("csat_survey_scheduling_failed", error=str(e))
+
     # Mark Chatwoot conversation as resolved if it is linked
     try:
         from core.memory.session import get_session

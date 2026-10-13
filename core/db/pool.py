@@ -80,7 +80,8 @@ async def close_pools() -> None:
             log.info("async_db_pool_closed")
         except Exception as e:
             log.error("async_db_pool_close_failed", error=str(e))
-        async_pool = None
+        finally:
+            async_pool = None
 
     if sync_pool is not None:
         try:
@@ -88,7 +89,8 @@ async def close_pools() -> None:
             log.info("sync_db_pool_closed")
         except Exception as e:
             log.error("sync_db_pool_close_failed", error=str(e))
-        sync_pool = None
+        finally:
+            sync_pool = None
 
 
 def get_sync_pool() -> ConnectionPool:

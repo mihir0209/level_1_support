@@ -353,7 +353,7 @@ async def assemble_context(
 
     # ── Steps 3+4+5: Parallel fetch ──────────────────────────────────────
     # User context is already passed in (fetched externally for flexibility)
-    # Graph retrieval, brand info, and Graphiti history run in parallel
+    # Graph retrieval, brand info, Graphiti history, and customer history run in parallel
     customer_id = customer.id if customer else None
 
     async def _fetch_graphiti_history() -> list[str]:
@@ -371,7 +371,17 @@ async def assemble_context(
             log.warning("graphiti_read_failed", brand_id=brand_id, error=str(e))
             return []
 
-    knowledge, brand_info, history_facts = await asyncio.gather(
+    async def _fetch_customer_history() -> list[dict]:
+        if not customer_id:
+            return []
+        try:
+            from core.crm.customer_history import get_customer_history
+            return await get_customer_history(customer_id, limit=5)
+        except Exception as e:
+            log.warning("customer_history_fetch_failed", brand_id=brand_id, error=str(e))
+            return []
+
+    knowledge, brand_info, history_facts, customer_history = await asyncio.gather(
         asyncio.to_thread(
             retrieve_knowledge,
             brand_id,
@@ -384,6 +394,7 @@ async def assemble_context(
         ),
         asyncio.to_thread(get_brand_info, brand_id),
         _fetch_graphiti_history(),
+        _fetch_customer_history(),
     )
 
     # ── Step 6: Session Compression ──────────────────────────────────────
@@ -409,6 +420,14 @@ async def assemble_context(
 
     # Build context blocks
     user_context_block = _format_user_context_block(customer, history_facts)
+
+    # Append returning customer history if available (Phase 27)
+    if customer_history:
+        from core.crm.customer_history import format_history_block
+        history_block = format_history_block(customer_history)
+        if history_block:
+            user_context_block = user_context_block + "\n\n" + history_block
+
     policy_block = _format_policy_block(knowledge.policy, brand_name)
     shipping_block = _format_shipping_block(knowledge.shipping_policy, brand_name)
     resolution_block = _format_resolution_block(knowledge.resolutions, knowledge.kb_items)

@@ -243,3 +243,29 @@ class SessionAuditLog(Base):
     compliance_violations: Mapped[str | None] = mapped_column(Text, nullable=True)
     audit_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+class CSATMitigation(Base):
+    __tablename__ = "csat_mitigations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("support_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    customer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    satisfaction: Mapped[float] = mapped_column(Float, nullable=False)
+    suggested_playbook: Mapped[str] = mapped_column(String(255), nullable=False)
+    playbook_details: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="pending")  # pending, approved, dismissed
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_response: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    variant_group: Mapped[str] = mapped_column(String(10), default="A", server_default="A")
+    recovery_converted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+

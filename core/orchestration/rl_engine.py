@@ -52,28 +52,37 @@ async def select_best_arm(category: str) -> str:
     return best_arm
 
 
-async def register_feedback(category: str, arm_name: str, reward: int) -> None:
+async def register_feedback(category: str, arm_name: str, reward: float) -> None:
     """
-    Update Beta distribution stats based on reward feedback (+1 for success, <=0 for failure).
+    Update Beta distribution stats based on reward feedback.
+    Supports binary (1.0/0.0) and continuous rewards in range [0.0, 1.0].
+    For a given reward r, we increment alpha by r and beta by 1.0 - r.
     """
     arms = DEFAULT_ARMS.get(category, [])
     if arm_name not in arms:
         return
 
+    # Bound reward to [0.0, 1.0] range
+    r_val = max(0.0, min(1.0, float(reward)))
+
     try:
         r = get_redis()
-        if reward > 0:
-            key = f"rl:{category}:{arm_name}:alpha"
-        else:
-            key = f"rl:{category}:{arm_name}:beta"
+        alpha_key = f"rl:{category}:{arm_name}:alpha"
+        beta_key = f"rl:{category}:{arm_name}:beta"
 
         # Initialize to 1.0 (Bayesian uniform prior baseline) if not exists
-        exists = await r.exists(key)
-        if not exists:
-            await r.set(key, 1.0)
+        for key in (alpha_key, beta_key):
+            exists = await r.exists(key)
+            if not exists:
+                await r.set(key, 1.0)
 
-        await r.incrbyfloat(key, 1.0)
-        log.info("rl_feedback_registered", category=category, arm=arm_name, reward=reward)
+        # Update alpha and beta with continuous rewards
+        if r_val > 0.0:
+            await r.incrbyfloat(alpha_key, r_val)
+        if (1.0 - r_val) > 0.0:
+            await r.incrbyfloat(beta_key, 1.0 - r_val)
+
+        log.info("rl_feedback_registered", category=category, arm=arm_name, reward=r_val)
     except Exception as e:
         log.warning("rl_register_feedback_failed", category=category, arm=arm_name, error=str(e))
 

@@ -97,6 +97,7 @@ function app() {
     selectedSessId: '',
     sessTakeoverInput: '',
     sessionDetail: null,
+    customerHistory: [],
 
     // ── MONITORING ──────────────────────────────────────────────
     services: [],
@@ -108,9 +109,14 @@ function app() {
       { id: 'overview', label: 'System Overview' },
       { id: 'jobs',      label: 'Ingestion Jobs' },
       { id: 'analytics', label: 'KG & Intent Analytics' },
+      { id: 'csat',      label: 'CSAT Analytics' },
     ],
     ingestionJobs: [],
     intentAnalytics: { postgres_intents: [], kg_resolutions: [] },
+    csatAnalytics: { brand_stats: [], intent_stats: [] },
+    csatBrandFilter: '',
+    csatMinFilter: '',
+    csatFormat: 'csv',
     analyticsLoading: false,
 
     // ── BRANDS ──────────────────────────────────────────────────
@@ -545,8 +551,18 @@ function app() {
     async openSessionDetail(id) {
       this.selectedSessId = id;
       this.sessTab = 'detail';
-      try { this.sessionDetail = await this.api('/admin/sessions/' + id); }
-      catch (e) { this.sessionDetail = null; this.toast('Failed to load session: ' + e.message, 'toast-error'); }
+      this.customerHistory = [];
+      try {
+        this.sessionDetail = await this.api('/admin/sessions/' + id);
+        if (this.sessionDetail && this.sessionDetail.customer_id) {
+          const res = await this.api('/admin/customers/' + this.sessionDetail.customer_id + '/history');
+          this.customerHistory = res.sessions || [];
+        }
+      }
+      catch (e) {
+        this.sessionDetail = null;
+        this.toast('Failed to load session: ' + e.message, 'toast-error');
+      }
     },
 
     async toggleTakeover(sessionId, forceVal) {
@@ -625,6 +641,7 @@ function app() {
             { label: 'Active Sessions',   value: o.active_sessions || 0,    sub: 'in Redis' },
             { label: 'Graph Nodes',        value: (o.knowledge_graph?.nodes_by_label || []).reduce((a, n) => a + n.count, 0), sub: 'in FalkorDB' },
             { label: 'KB Chunks',          value: Object.values(o.postgres_kb || {}).reduce((a, c) => a + c, 0), sub: 'in pgvector' },
+            { label: 'Avg. CSAT',          value: o.avg_csat !== undefined ? `${o.avg_csat}/5.0` : 'N/A', sub: 'from Postgres' },
           ];
         }
 
@@ -1367,6 +1384,15 @@ function app() {
     selectedApproval: null,
     approvalFeedback: '',
     approvalLoading: false,
+    pendingMitigations: [],
+    mitigationTab: 'approvals',
+    mitigationSubTabs: [
+      { id: 'approvals', label: 'Action Approvals' },
+      { id: 'mitigations', label: 'CSAT Mitigations' },
+      { id: 'analytics', label: 'Mitigation Analytics' }
+    ],
+    mitigationAnalytics: { status_counts: { pending: 0, executed: 0, failed_retry: 0, failed: 0, dismissed: 0 }, playbook_stats: [], avg_retries: 0.0, total_count: 0, ab_stats: { A: { total: 0, executed: 0, failed: 0, converted: 0, conversion_rate_percent: 0.0 }, B: { total: 0, executed: 0, failed: 0, converted: 0, conversion_rate_percent: 0.0 } } },
+    mitigationLoading: false,
 
     async loadPendingApprovals() {
       this.approvalLoading = true;
@@ -1414,6 +1440,67 @@ function app() {
         this.toast('Failed to submit decision: ' + e.message, 'toast-error');
       } finally {
         this.approvalLoading = false;
+      }
+    },
+
+    async loadPendingMitigations() {
+      this.mitigationLoading = true;
+      try {
+        const data = await this.api('/admin/mitigations/pending');
+        this.pendingMitigations = data.items || [];
+      } catch (e) {
+        this.toast('Failed to load pending mitigations: ' + e.message, 'toast-error');
+      } finally {
+        this.mitigationLoading = false;
+      }
+    },
+
+    async loadMitigationAnalytics() {
+      this.mitigationLoading = true;
+      try {
+        const data = await this.api('/admin/analytics/mitigations');
+        this.mitigationAnalytics = data || {
+          status_counts: { pending: 0, executed: 0, failed_retry: 0, failed: 0, dismissed: 0 },
+          playbook_stats: [],
+          avg_retries: 0.0,
+          total_count: 0,
+          ab_stats: { A: { total: 0, executed: 0, failed: 0, converted: 0, conversion_rate_percent: 0.0 }, B: { total: 0, executed: 0, failed: 0, converted: 0, conversion_rate_percent: 0.0 } }
+        };
+      } catch (e) {
+        this.toast('Failed to load mitigation analytics: ' + e.message, 'toast-error');
+      } finally {
+        this.mitigationLoading = false;
+      }
+    },
+
+    async submitMitigationAction(mitigation_id, action) {
+      this.mitigationLoading = true;
+      try {
+        await this.api(`/admin/mitigations/${mitigation_id}/action`, {
+          method: 'POST',
+          body: JSON.stringify({ action: action })
+        });
+        this.toast(`CSAT Mitigation playbook ${action}ed successfully!`, 'toast-success');
+        await this.loadPendingMitigations();
+      } catch (e) {
+        this.toast('Failed to submit mitigation action: ' + e.message, 'toast-error');
+      } finally {
+        this.mitigationLoading = false;
+      }
+    },
+
+    async convertMitigationPlaybook(mitigation_id) {
+      this.mitigationLoading = true;
+      try {
+        await this.api(`/admin/mitigations/${mitigation_id}/convert`, {
+          method: 'POST'
+        });
+        this.toast('CSAT Mitigation playbook recovery converted!', 'toast-success');
+        await this.loadMitigationAnalytics();
+      } catch (e) {
+        this.toast('Failed to convert mitigation: ' + e.message, 'toast-error');
+      } finally {
+        this.mitigationLoading = false;
       }
     },
 
@@ -1525,6 +1612,30 @@ function app() {
       }
     },
 
+    async loadCSATAnalytics() {
+      this.analyticsLoading = true;
+      try {
+        const data = await this.api('/admin/analytics/csat');
+        this.csatAnalytics = data || { brand_stats: [], intent_stats: [] };
+      } catch (e) {
+        this.toast('Failed to load CSAT analytics: ' + e.message, 'toast-error');
+      } finally {
+        this.analyticsLoading = false;
+      }
+    },
+
+    exportCSATReport() {
+      let url = `/admin/analytics/csat/export?format=${this.csatFormat}`;
+      if (this.csatBrandFilter) {
+        url += `&brand_id=${encodeURIComponent(this.csatBrandFilter)}`;
+      }
+      if (this.csatMinFilter) {
+        url += `&min_satisfaction=${encodeURIComponent(this.csatMinFilter)}`;
+      }
+      window.open(url, '_blank');
+      this.toast('Report export triggered!', 'toast-success');
+    },
+
     connectWS() {
       try {
         const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1560,6 +1671,10 @@ function app() {
               this.safetyAlerts.unshift(msg.data);
               this.toast(`Security Alert: Blocked attack payload in session ${msg.data.session_id}`, 'toast-error');
             }
+
+            if (msg.event === 'csat_risk_alert') {
+              this.toast(`High Churn Risk Warning: Customer ${msg.data.customer_id} initiated session ${msg.data.session_id} - Priority SLA Enforced!`, 'toast-error');
+            }
             
             if (msg.event === 'system_metrics') {
               const d = msg.data;
@@ -1570,6 +1685,7 @@ function app() {
                   { label: 'Active Sessions',   value: o.active_sessions || 0,    sub: 'in Redis' },
                   { label: 'Graph Nodes',        value: (o.knowledge_graph?.nodes_by_label || []).reduce((a, n) => a + n.count, 0), sub: 'in FalkorDB' },
                   { label: 'KB Chunks',          value: Object.values(o.postgres_kb || {}).reduce((a, c) => a + c, 0), sub: 'in pgvector' },
+                  { label: 'Avg. CSAT',          value: o.avg_csat !== undefined ? `${o.avg_csat}/5.0` : 'N/A', sub: 'from Postgres' },
                 ];
                 if (o.knowledge_graph) {
                   this.graphStats.nodes = o.knowledge_graph.nodes_by_label || [];

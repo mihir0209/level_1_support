@@ -139,6 +139,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning("auto_escalator_start_failed", error=str(e))
 
+    # Start playbook execution retry worker (Phase 36)
+    try:
+        from core.crm.mitigation import start_playbook_retry_worker
+        start_playbook_retry_worker()
+    except Exception as e:
+        log.warning("playbook_retry_worker_start_failed", error=str(e))
+
     # Register demo tools API
     from core.tools.api import router as demo_router
     app.include_router(demo_router)
@@ -741,6 +748,21 @@ async def chat(req: ChatRequest, request: Request = None):
     if not session_data:
         raise HTTPException(status_code=404, detail="Session not found or expired.")
 
+    # Check if CSAT survey is pending (Phase 28)
+    try:
+        from core.crm.csat import is_csat_pending, process_csat_response, THANK_YOU_RESPONSE
+        if await is_csat_pending(req.session_id):
+            processed = await process_csat_response(req.session_id, req.message)
+            if processed:
+                return ChatResponse(
+                    session_id=req.session_id,
+                    response=THANK_YOU_RESPONSE,
+                    turn_count=session_data.get("turn_count", 0),
+                    is_resolved=True,
+                )
+    except Exception as exc:
+        log.warning("csat_response_processing_failed", session_id=req.session_id, error=str(exc))
+
     brand_id = session_data["brand_id"]
     channel = Channel(session_data["channel"])
     is_takeover = session_data.get("is_takeover", False)
@@ -963,6 +985,42 @@ async def chat(req: ChatRequest, request: Request = None):
         turn_count=turn_count,
         escalation_risk=risk_score
     )
+
+    # CSAT risk alert notification (Phase 29 & Phase 32 Webhook broadcast)
+    if turn_count == 1:
+        try:
+            from core.orchestration.csat_sla import is_customer_high_churn_risk
+            from core.crm.customer_history import get_customer_history
+            from core.orchestration.churn_alerts import broadcast_churn_alert
+
+            cust_id = req.customer_id or session_data.get("customer_id")
+            if cust_id and await is_customer_high_churn_risk(cust_id):
+                # Calculate average CSAT for payload
+                history = await get_customer_history(cust_id) or []
+                valid_scores = [h.get("satisfaction") for h in history if h.get("satisfaction") is not None]
+                avg_csat = sum(valid_scores) / len(valid_scores) if valid_scores else 0.0
+
+                # 1. Broadcast to WebSockets
+                await ws_manager.broadcast({
+                    "event": "csat_risk_alert",
+                    "data": {
+                        "session_id": req.session_id,
+                        "brand_id": brand_id,
+                        "customer_id": cust_id,
+                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                    }
+                })
+                log.info("csat_risk_alert_broadcasted", session_id=req.session_id, customer_id=cust_id)
+
+                # 2. Trigger webhook alert notification asynchronously
+                asyncio.create_task(broadcast_churn_alert(
+                    session_id=req.session_id,
+                    customer_id=cust_id,
+                    brand_id=brand_id,
+                    average_csat=avg_csat
+                ))
+        except Exception as exc:
+            log.warning("failed_to_broadcast_csat_risk_alert", session_id=req.session_id, error=str(exc))
 
     await update_session(req.session_id, {
         "messages": updated_messages,
@@ -1307,6 +1365,27 @@ async def chatwoot_webhook(request: Request):
         # Store chatwoot_conv_id inside session dict
         await update_session(session_id, {"chatwoot_conv_id": chatwoot_conv_id})
 
+    # Synchronize Chatwoot contact details to customer registry (Phase 26)
+    try:
+        from core.crm.contact_sync import sync_contact_from_webhook
+        await sync_contact_from_webhook(payload, brand_id, session_id)
+    except Exception as exc:
+        log.warning("contact_sync_failed", session_id=session_id, error=str(exc))
+
+    # Check if CSAT survey is pending (Phase 28)
+    try:
+        from core.crm.csat import is_csat_pending, process_csat_response, THANK_YOU_RESPONSE
+        if await is_csat_pending(session_id):
+            processed = await process_csat_response(session_id, content)
+            if processed:
+                return {
+                    "status": "processed",
+                    "session_id": session_id,
+                    "response": THANK_YOU_RESPONSE,
+                }
+    except Exception as exc:
+        log.warning("csat_response_processing_failed", session_id=session_id, error=str(exc))
+
     # Process message
     chat_req = ChatRequest(session_id=session_id, message=content)
     response = await chat(chat_req, request=request)
@@ -1412,6 +1491,121 @@ async def pending_approvals():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class CSATMitigationActionRequest(BaseModel):
+    action: str  # "approve" | "dismiss"
+
+
+@admin_router.get("/mitigations/pending", tags=["Approvals"])
+async def get_pending_mitigations():
+    """Retrieve all pending CSAT recovery playbooks awaiting supervisor review."""
+    if not settings.postgres_host:
+        return {"items": []}
+
+    try:
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        async with pool.connection() as conn:
+            rows = await (await conn.execute("""
+                SELECT id, session_id, customer_id, satisfaction, suggested_playbook, playbook_details, status, created_at
+                FROM csat_mitigations
+                WHERE status = 'pending'
+                ORDER BY created_at DESC
+            """)).fetchall()
+
+            items = [
+                {
+                    "id": str(r[0]),
+                    "session_id": str(r[1]),
+                    "customer_id": r[2],
+                    "satisfaction": r[3],
+                    "suggested_playbook": r[4],
+                    "playbook_details": r[5],
+                    "status": r[6],
+                    "created_at": r[7].isoformat() if r[7] else None
+                }
+                for r in rows
+            ]
+            return {"count": len(items), "items": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/mitigations/{mitigation_id}/action", tags=["Approvals"])
+async def act_on_mitigation(mitigation_id: str, payload: CSATMitigationActionRequest):
+    """Approve or dismiss a CSAT auto-mitigation playbook."""
+    if not settings.postgres_host:
+        raise HTTPException(status_code=503, detail="Postgres not configured")
+
+    action = payload.action.lower()
+    if action not in ["approve", "dismiss"]:
+        raise HTTPException(status_code=400, detail="Invalid action. Must be 'approve' or 'dismiss'.")
+
+    new_status = "approved" if action == "approve" else "dismissed"
+
+    try:
+        import uuid
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        async with pool.connection() as conn:
+            # Check if record exists
+            exists = await (await conn.execute(
+                "SELECT id FROM csat_mitigations WHERE id = %s",
+                (uuid.UUID(mitigation_id),)
+            )).fetchone()
+            if not exists:
+                raise HTTPException(status_code=404, detail="Mitigation record not found.")
+
+            await conn.execute(
+                "UPDATE csat_mitigations SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (new_status, uuid.UUID(mitigation_id))
+            )
+            log.info("csat_mitigation_status_updated", id=mitigation_id, status=new_status)
+
+            if new_status == "approved":
+                try:
+                    from core.crm.mitigation import execute_playbook_mitigation
+                    await execute_playbook_mitigation(uuid.UUID(mitigation_id))
+                except Exception as exec_err:
+                    log.warning("failed_to_trigger_approved_mitigation_execution", id=mitigation_id, error=str(exec_err))
+
+        return {"status": "success", "mitigation_id": mitigation_id, "new_status": new_status}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UUID format.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.post("/mitigations/{mitigation_id}/convert", tags=["Approvals"])
+async def convert_mitigation(mitigation_id: str):
+    """Mark a CSAT auto-mitigation playbook recovery as converted (successful customer recovery)."""
+    if not settings.postgres_host:
+        raise HTTPException(status_code=503, detail="Postgres not configured")
+
+    try:
+        import uuid
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        async with pool.connection() as conn:
+            exists = await (await conn.execute(
+                "SELECT id FROM csat_mitigations WHERE id = %s",
+                (uuid.UUID(mitigation_id),)
+            )).fetchone()
+            if not exists:
+                raise HTTPException(status_code=404, detail="Mitigation record not found.")
+
+            await conn.execute(
+                "UPDATE csat_mitigations SET recovery_converted = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (uuid.UUID(mitigation_id),)
+            )
+            log.info("csat_mitigation_converted", id=mitigation_id)
+
+        return {"status": "success", "mitigation_id": mitigation_id, "recovery_converted": True}
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UUID format.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @admin_router.get("/audit-logs", tags=["Audit Logs"])
 async def audit_logs(limit: int = 50, offset: int = 0, brand_id: str | None = None):
     """Retrieve paginated and filterable session audit logs from PostgreSQL."""
@@ -1495,6 +1689,277 @@ async def intent_performance():
             "postgres_intents": postgres_stats,
             "kg_resolutions": kg_resolutions
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/analytics/csat", tags=["Analytics"])
+async def csat_analytics():
+    """
+    Retrieve aggregated CSAT analytics:
+    - brand_stats: brand-wise CSAT average and low score count.
+    - intent_stats: intent-wise CSAT average and total count.
+    """
+    if not settings.postgres_host:
+        return {"brand_stats": [], "intent_stats": []}
+
+    try:
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        
+        async with pool.connection() as conn:
+            # Query brand-wise CSAT stats
+            brand_rows = await (await conn.execute("""
+                SELECT 
+                    brand_id,
+                    COUNT(*) as total_responses,
+                    COALESCE(AVG(satisfaction), 0.0) as avg_csat,
+                    COUNT(CASE WHEN satisfaction < 3.0 THEN 1 END) as low_csat_count
+                FROM support_sessions
+                WHERE satisfaction IS NOT NULL
+                GROUP BY brand_id
+                ORDER BY avg_csat DESC
+            """)).fetchall()
+            
+            brand_stats = [
+                {
+                    "brand_id": r[0],
+                    "total_responses": r[1],
+                    "avg_csat": round(float(r[2]), 2),
+                    "low_csat_count": r[3]
+                }
+                for r in brand_rows
+            ]
+
+            # Query intent-wise CSAT stats
+            intent_rows = await (await conn.execute("""
+                SELECT 
+                    intent,
+                    COUNT(*) as total_responses,
+                    COALESCE(AVG(satisfaction), 0.0) as avg_csat
+                FROM support_sessions
+                WHERE satisfaction IS NOT NULL AND intent IS NOT NULL
+                GROUP BY intent
+                ORDER BY avg_csat ASC
+            """)).fetchall()
+            
+            intent_stats = [
+                {
+                    "intent": r[0],
+                    "total_responses": r[1],
+                    "avg_csat": round(float(r[2]), 2)
+                }
+                for r in intent_rows
+            ]
+
+        return {
+            "brand_stats": brand_stats,
+            "intent_stats": intent_stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/analytics/mitigations", tags=["Analytics"])
+async def mitigations_analytics():
+    """
+    Retrieve aggregated analytics for low-CSAT mitigation playbooks:
+    - status_counts: pending, executed, failed_retry, failed, dismissed counts.
+    - playbook_stats: success/failure stats grouped by playbook type.
+    - avg_retries: average retry counts for executed/failed playbooks.
+    """
+    if not settings.postgres_host:
+        return {
+            "status_counts": {"pending": 0, "executed": 0, "failed_retry": 0, "failed": 0, "dismissed": 0},
+            "playbook_stats": [],
+            "avg_retries": 0.0,
+            "total_count": 0
+        }
+
+    try:
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+
+        async with pool.connection() as conn:
+            # 1. Status Counts
+            status_rows = await (await conn.execute("""
+                SELECT status, COUNT(*)
+                FROM csat_mitigations
+                GROUP BY status
+            """)).fetchall()
+            status_counts = {"pending": 0, "executed": 0, "failed_retry": 0, "failed": 0, "dismissed": 0}
+            total = 0
+            for r in status_rows:
+                status_counts[r[0]] = r[1]
+                total += r[1]
+
+            # 2. Avg Retries
+            retries_row = await (await conn.execute("""
+                SELECT COALESCE(AVG(retry_count), 0.0)
+                FROM csat_mitigations
+                WHERE status IN ('executed', 'failed', 'failed_retry')
+            """)).fetchone()
+            avg_retries = round(float(retries_row[0]), 2) if retries_row else 0.0
+
+            # 3. Playbook Type Stats
+            playbook_rows = await (await conn.execute("""
+                SELECT 
+                    suggested_playbook,
+                    COUNT(*),
+                    COUNT(CASE WHEN status = 'executed' THEN 1 END),
+                    COUNT(CASE WHEN status = 'failed' THEN 1 END)
+                FROM csat_mitigations
+                GROUP BY suggested_playbook
+            """)).fetchall()
+
+            playbook_stats = []
+            for r in playbook_rows:
+                total_playbook = r[1]
+                executed_count = r[2]
+                failed_count = r[3]
+                success_rate = 0.0
+                if (executed_count + failed_count) > 0:
+                    success_rate = round((executed_count / (executed_count + failed_count)) * 100, 2)
+                playbook_stats.append({
+                    "playbook_type": r[0],
+                    "total": total_playbook,
+                    "executed": executed_count,
+                    "failed": failed_count,
+                    "success_rate_percent": success_rate
+                })
+
+            # 4. A/B Variant Stats
+            ab_rows = await (await conn.execute("""
+                SELECT 
+                    variant_group,
+                    COUNT(*),
+                    COUNT(CASE WHEN status = 'executed' THEN 1 END),
+                    COUNT(CASE WHEN status = 'failed' THEN 1 END),
+                    COUNT(CASE WHEN recovery_converted = TRUE THEN 1 END)
+                FROM csat_mitigations
+                GROUP BY variant_group
+            """)).fetchall()
+
+            ab_stats = {
+                "A": {"total": 0, "executed": 0, "failed": 0, "converted": 0, "conversion_rate_percent": 0.0},
+                "B": {"total": 0, "executed": 0, "failed": 0, "converted": 0, "conversion_rate_percent": 0.0}
+            }
+            for r in ab_rows:
+                v = r[0]
+                if v in ab_stats:
+                    total_v = r[1]
+                    executed_v = r[2]
+                    failed_v = r[3]
+                    converted_v = r[4]
+                    rate_v = round((converted_v / executed_v) * 100, 2) if executed_v > 0 else 0.0
+                    ab_stats[v] = {
+                        "total": total_v,
+                        "executed": executed_v,
+                        "failed": failed_v,
+                        "converted": converted_v,
+                        "conversion_rate_percent": rate_v
+                    }
+
+        return {
+            "status_counts": status_counts,
+            "playbook_stats": playbook_stats,
+            "avg_retries": avg_retries,
+            "total_count": total,
+            "ab_stats": ab_stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@admin_router.get("/analytics/csat/export", tags=["Analytics"])
+async def csat_export(
+    brand_id: str | None = None,
+    min_satisfaction: float | None = None,
+    format: str = "csv"
+):
+    """
+    Export raw CSAT survey logs filtered by brand and/or score threshold.
+    Supports 'csv' and 'jsonl' format.
+    """
+    if not settings.postgres_host:
+        raise HTTPException(status_code=503, detail="Postgres not configured")
+
+    try:
+        from core.db.pool import get_async_pool
+        pool = get_async_pool()
+        
+        query = """
+            SELECT id, brand_id, customer_id, channel, intent, outcome, turn_count, satisfaction, started_at, ended_at
+            FROM support_sessions
+            WHERE satisfaction IS NOT NULL
+        """
+        params = []
+        
+        if brand_id:
+            query += " AND brand_id = %s"
+            params.append(brand_id)
+            
+        if min_satisfaction is not None:
+            query += " AND satisfaction >= %s"
+            params.append(min_satisfaction)
+            
+        query += " ORDER BY ended_at DESC"
+
+        async with pool.connection() as conn:
+            rows = await (await conn.execute(query, params)).fetchall()
+
+        if format.lower() == "csv":
+            import io
+            import csv
+            from fastapi.responses import StreamingResponse
+
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(["session_id", "brand_id", "customer_id", "channel", "intent", "outcome", "turn_count", "satisfaction", "started_at", "ended_at"])
+            
+            for r in rows:
+                writer.writerow([
+                    str(r[0]),
+                    r[1],
+                    r[2] or "",
+                    r[3],
+                    r[4] or "",
+                    r[5] or "",
+                    r[6],
+                    r[7],
+                    r[8].isoformat() if r[8] else "",
+                    r[9].isoformat() if r[9] else ""
+                ])
+                
+            output.seek(0)
+            headers = {"Content-Disposition": "attachment; filename=csat_export.csv"}
+            return StreamingResponse(io.BytesIO(output.getvalue().encode("utf-8")), media_type="text/csv", headers=headers)
+            
+        else:
+            # Default JSON Lines (JSONL)
+            import io
+            from fastapi.responses import StreamingResponse
+
+            lines = []
+            for r in rows:
+                data = {
+                    "session_id": str(r[0]),
+                    "brand_id": r[1],
+                    "customer_id": r[2],
+                    "channel": r[3],
+                    "intent": r[4],
+                    "outcome": r[5],
+                    "turn_count": r[6],
+                    "satisfaction": r[7],
+                    "started_at": r[8].isoformat() if r[8] else None,
+                    "ended_at": r[9].isoformat() if r[9] else None
+                }
+                lines.append(json.dumps(data))
+                
+            content = "\n".join(lines)
+            headers = {"Content-Disposition": "attachment; filename=csat_export.jsonl"}
+            return StreamingResponse(io.BytesIO(content.encode("utf-8")), media_type="application/x-jsonlines", headers=headers)
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1592,6 +2057,28 @@ async def get_rl_stats(category: str = "empathy_mode"):
     try:
         from core.orchestration.rl_engine import get_all_arm_stats
         stats = await get_all_arm_stats(category)
+
+        # Integrate CSAT average scores per persona (Phase 31)
+        if category == "empathy_mode" and settings.postgres_host:
+            try:
+                from core.db.pool import get_async_pool
+                pool = get_async_pool()
+                async with pool.connection() as conn:
+                    for arm in stats:
+                        name = arm["arm_name"]
+                        row = await (await conn.execute(
+                            "SELECT AVG(satisfaction) FROM support_sessions WHERE metadata->>'empathy_mode' = %s AND satisfaction IS NOT NULL",
+                            (name,)
+                        )).fetchone()
+                        arm["avg_csat"] = round(float(row[0]), 2) if row and row[0] is not None else 0.0
+            except Exception as pg_err:
+                log.warning("rl_stats_csat_query_failed", error=str(pg_err))
+                for arm in stats:
+                    arm["avg_csat"] = 0.0
+        else:
+            for arm in stats:
+                arm["avg_csat"] = 0.0
+
         return {"stats": stats}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2473,6 +2960,7 @@ async def list_sessions(brand_id: Annotated[str | None, Query(max_length=64)] = 
                     "is_takeover": d.get("is_takeover", False),
                     "escalation_risk": d.get("escalation_risk", 0.0),
                     "sla_status": d.get("sla_status", "ok"),
+                    "is_priority_sla": d.get("is_priority_sla", False),
                 })
     return {"count": len(sessions), "sessions": sessions}
 
@@ -2501,7 +2989,8 @@ async def get_sla_alerts(limit: int = 50):
                     "outcome": d.get("outcome"),
                     "is_takeover": d.get("is_takeover", False),
                     "escalation_risk": d.get("escalation_risk", 0.0),
-                    "sla_status": status
+                    "sla_status": status,
+                    "is_priority_sla": d.get("is_priority_sla", False),
                 })
     return {"count": len(alerts), "items": alerts[:limit]}
 
@@ -2887,6 +3376,7 @@ async def system_overview():
         pass
 
     pg_stats = {}
+    avg_csat = 0.0
     if settings.postgres_host:
         try:
             from core.db.pool import get_async_pool
@@ -2896,6 +3386,13 @@ async def system_overview():
                     "SELECT brand_id, count(*) FROM knowledge_chunks GROUP BY brand_id"
                 )).fetchall()
                 pg_stats = {r[0]: r[1] for r in rows}
+
+                # Average CSAT (Phase 28)
+                csat_row = await (await conn.execute(
+                    "SELECT AVG(satisfaction) FROM support_sessions WHERE satisfaction IS NOT NULL"
+                )).fetchone()
+                if csat_row and csat_row[0] is not None:
+                    avg_csat = round(float(csat_row[0]), 2)
         except Exception:
             pass
 
@@ -2913,6 +3410,7 @@ async def system_overview():
         "postgres_kb": pg_stats,
         "active_sessions": session_count,
         "registered_brands": len(BRAND_REGISTRY),
+        "avg_csat": avg_csat,
     }
 
 
@@ -3509,6 +4007,24 @@ async def admin_ingest(req: IngestRequest):
     else:
         from ingestion.scheduler import trigger_crawl_now
         return await trigger_crawl_now(brand_id)
+
+
+@app.get("/admin/customers/{customer_id}/history", tags=["Admin"])
+async def admin_customer_history(customer_id: str, limit: int = 5):
+    """
+    Retrieve past session history for a specific customer.
+    Returns structured timeline of prior interactions (intent, outcome,
+    satisfaction, turn count) for dashboard inspection.
+    """
+    from core.crm.customer_history import get_customer_history, format_history_block
+
+    history = await get_customer_history(customer_id, limit=limit)
+    return {
+        "customer_id": customer_id,
+        "session_count": len(history),
+        "sessions": history,
+        "prompt_block": format_history_block(history),
+    }
 
 
 @app.get("/admin/jobs", tags=["System"])

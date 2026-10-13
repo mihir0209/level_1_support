@@ -125,7 +125,7 @@ class TestModelsMatchSchema:
             "knowledge_chunks", "support_sessions", "intent_label_queue",
             "resolution_review_queue", "crawl_sources", "brand_api_config",
             "registered_api_endpoints", "brand_api_credentials",
-            "registered_brands",
+            "registered_brands", "csat_mitigations",
         }
         assert expected.issubset(tables), f"Missing tables: {expected - tables}"
 

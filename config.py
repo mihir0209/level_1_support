@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     # ── Confidence thresholds (single source of truth) ──────────────────
     low_confidence_threshold: float = Field(default=0.45)
     csat_dissatisfied_threshold: float = Field(default=0.4)
+    churn_alert_webhook_url: str = Field(default="")
+    playbook_execution_webhook_url: str = Field(default="")
+    playbook_failure_alert_webhook_url: str = Field(default="")
 
     @property
     def postgres_dsn(self) -> str:
